@@ -1,0 +1,37 @@
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Arduino build artifacts
+build/
+*.hex
+*.elf
+*.eep
+*.map
+*.lst
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Data captures
+*.csv
+log_*.txt
+training_data.csv
+
+# Temporary
+*.log
+*.tmp
+*.bak
