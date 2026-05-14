@@ -67,11 +67,8 @@ const float BASELINE_LOCK_DELTA = 0.5;
 
 const int POLES = 2;
 float targetRPS = 1.0;
-int sensorMax = 0;
-int sensorMin = 1023;
-bool fanCalibrated = false;
-unsigned long fanCalibStart = 0;
-const unsigned long FAN_CALIB_TIME = 3000;
+int sensorMax = 800;
+int sensorMin = 200;
 unsigned long lastPulseTime = 0;
 unsigned long lastPulseReceived = 0;
 bool aboveThreshold = false;
@@ -476,17 +473,14 @@ void updateFanSensor() {
   int val = analogRead(PIN_FAN_SENSOR);
   unsigned long nowMicros = micros();
 
-  if (!fanCalibrated) {
-    if (val > sensorMax) sensorMax = val;
-    if (val < sensorMin) sensorMin = val;
-    if (millis() - fanCalibStart >= FAN_CALIB_TIME) {
-      fanCalibrated = true;
-    }
-    return;
-  }
+  if (val > sensorMax) sensorMax = val;
+  if (val < sensorMin) sensorMin = val;
+
+  int range = sensorMax - sensorMin;
+  if (range < 50) return;
 
   int threshold = (sensorMax + sensorMin) / 2;
-  int hysteresis = (sensorMax - sensorMin) / 6;
+  int hysteresis = range / 6;
 
   if (!aboveThreshold && val > threshold + hysteresis) {
     aboveThreshold = true;
@@ -504,9 +498,6 @@ void updateFanSensor() {
     aboveThreshold = false;
   }
   if (nowMicros - lastPulseReceived > 500000) rps = 0;
-
-  if (val > sensorMax) sensorMax = val;
-  if (val < sensorMin) sensorMin = val;
 }
 
 float weightFromCard(char prog) {
@@ -729,13 +720,13 @@ void setup() {
   servoY.writeMicroseconds(1000);
 
   setupPWM10bit();
-  fanCalibStart = millis();
 
   showDash(CLK1, DIO1);
   clearDisplay(CLK2, DIO2);
   clearDisplay(CLK3, DIO3);
 
-  state = STATE_FAN_CALIB;
+  ledBlink(IDX_CARD, 2.0);
+  state = STATE_WAIT_CARD;
   stateStartTime = millis();
 }
 
@@ -746,38 +737,14 @@ void loop() {
 
   switch (state) {
 
-    case STATE_FAN_CALIB: {
-      if (fanCalibrated) {
-        state = STATE_WEIGHT_ZERO_CALIB;
-        stateStartTime = now;
-      }
-      break;
-    }
-
+    case STATE_FAN_CALIB:
     case STATE_WEIGHT_ZERO_CALIB: {
-      static float sumF = 0;
-      static int cntF = 0;
-      float f = measureFreq();
-      if (now - stateStartTime > 1000) {
-        sumF += f;
-        cntF++;
-      }
-      if (now - stateStartTime >= 4000) {
-        zeroFreq = (cntF > 0) ? sumF / cntF : MODEL_C;
-        zeroOffset = zeroFreq - MODEL_C;
-        sumF = 0;
-        cntF = 0;
-        Serial.print("ZERO_FREQ=");
-        Serial.print(zeroFreq, 3);
-        Serial.print(" OFFSET=");
-        Serial.println(zeroOffset, 3);
-        state = STATE_WAIT_CARD;
-        stateStartTime = now;
-        ledBlink(IDX_CARD, 2.0);
-        showDash(CLK1, DIO1);
-        clearDisplay(CLK2, DIO2);
-        clearDisplay(CLK3, DIO3);
-      }
+      state = STATE_WAIT_CARD;
+      stateStartTime = now;
+      ledBlink(IDX_CARD, 2.0);
+      showDash(CLK1, DIO1);
+      clearDisplay(CLK2, DIO2);
+      clearDisplay(CLK3, DIO3);
       break;
     }
 
