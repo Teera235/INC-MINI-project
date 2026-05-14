@@ -267,54 +267,48 @@ void showTemp(int clk, int dio, float t) {
   writeRaw(clk, dio, b1, b2, b3, b4);
 }
 
-struct LedBlinker {
-  uint8_t pin;
-  bool enabled;
-  bool solid;
-  unsigned long periodMs;
-  unsigned long lastToggle;
-  bool state;
-};
+#define LED_COUNT 3
+#define IDX_CARD  0
+#define IDX_SCAN  1
+#define IDX_WEIGH 2
 
-LedBlinker ledCard  = { PIN_LED_CARD,  false, false, 500, 0, false };
-LedBlinker ledScan  = { PIN_LED_SCAN,  false, false, 500, 0, false };
-LedBlinker ledWeigh = { PIN_LED_WEIGH, false, false, 500, 0, false };
+uint8_t  ledPin[LED_COUNT]      = { PIN_LED_CARD, PIN_LED_SCAN, PIN_LED_WEIGH };
+bool     ledEnabled[LED_COUNT]  = { false, false, false };
+bool     ledSolidF[LED_COUNT]   = { false, false, false };
+unsigned long ledPeriod[LED_COUNT]  = { 500, 500, 500 };
+unsigned long ledToggle[LED_COUNT]  = { 0, 0, 0 };
+bool     ledState[LED_COUNT]    = { false, false, false };
 
-void ledOff(LedBlinker &b) {
-  b.enabled = false;
-  b.solid = false;
-  digitalWrite(b.pin, LOW);
-  b.state = false;
+void ledOff(int idx) {
+  ledEnabled[idx] = false;
+  ledSolidF[idx]  = false;
+  digitalWrite(ledPin[idx], LOW);
+  ledState[idx] = false;
 }
 
-void ledSolid(LedBlinker &b) {
-  b.enabled = true;
-  b.solid = true;
-  digitalWrite(b.pin, HIGH);
-  b.state = true;
+void ledSolid(int idx) {
+  ledEnabled[idx] = true;
+  ledSolidF[idx]  = true;
+  digitalWrite(ledPin[idx], HIGH);
+  ledState[idx] = true;
 }
 
-void ledBlink(LedBlinker &b, float hz) {
-  b.enabled = true;
-  b.solid = false;
-  b.periodMs = (unsigned long)(500.0 / hz);
-  if (b.periodMs < 50) b.periodMs = 50;
-}
-
-void updateLed(LedBlinker &b, unsigned long now) {
-  if (!b.enabled) return;
-  if (b.solid) return;
-  if (now - b.lastToggle >= b.periodMs) {
-    b.lastToggle = now;
-    b.state = !b.state;
-    digitalWrite(b.pin, b.state ? HIGH : LOW);
-  }
+void ledBlink(int idx, float hz) {
+  ledEnabled[idx] = true;
+  ledSolidF[idx]  = false;
+  unsigned long p = (unsigned long)(500.0 / hz);
+  ledPeriod[idx]  = (p < 50) ? 50 : p;
 }
 
 void updateAllLeds(unsigned long now) {
-  updateLed(ledCard, now);
-  updateLed(ledScan, now);
-  updateLed(ledWeigh, now);
+  for (int i = 0; i < LED_COUNT; i++) {
+    if (!ledEnabled[i] || ledSolidF[i]) continue;
+    if (now - ledToggle[i] >= ledPeriod[i]) {
+      ledToggle[i] = now;
+      ledState[i]  = !ledState[i];
+      digitalWrite(ledPin[i], ledState[i] ? HIGH : LOW);
+    }
+  }
 }
 
 void buzzerBlink(unsigned long now, unsigned long periodMs) {
@@ -709,7 +703,7 @@ void loop() {
         Serial.println(zeroOffset, 3);
         state = STATE_WAIT_CARD;
         stateStartTime = now;
-        ledBlink(ledCard, 2.0);
+        ledBlink(IDX_CARD, 2.0);
         showDash(CLK1, DIO1);
         clearDisplay(CLK2, DIO2);
         clearDisplay(CLK3, DIO3);
@@ -720,9 +714,9 @@ void loop() {
     case STATE_WAIT_CARD: {
       int r = readCardOnce();
       if (cardInserted) {
-        ledSolid(ledCard);
-      } else if (!cardInserted && !ledCard.solid) {
-        ledBlink(ledCard, 2.0);
+        ledSolid(IDX_CARD);
+      } else if (!cardInserted && !ledSolidF[IDX_CARD]) {
+        ledBlink(IDX_CARD, 2.0);
       }
       if (r == 1) {
         programValid = true;
@@ -732,7 +726,7 @@ void loop() {
         if (programNum == '1')      writeRaw(CLK1, DIO1, SEG_BLANK, SEG_BLANK, SEG_BLANK, seg[1]);
         else if (programNum == '2') writeRaw(CLK1, DIO1, SEG_BLANK, SEG_BLANK, SEG_BLANK, seg[2]);
         else if (programNum == '3') writeRaw(CLK1, DIO1, SEG_BLANK, SEG_BLANK, SEG_BLANK, seg[3]);
-        ledBlink(ledCard, 2.0);
+        ledBlink(IDX_CARD, 2.0);
         state = STATE_CARD_VALID_DISPLAY;
         stateStartTime = now;
       } else if (r == 2) {
@@ -749,8 +743,8 @@ void loop() {
 
     case STATE_CARD_VALID_DISPLAY: {
       if (now - stateStartTime >= 2000) {
-        ledOff(ledCard);
-        ledBlink(ledScan, 0.25);
+        ledOff(IDX_CARD);
+        ledBlink(IDX_SCAN, 0.25);
         showDash(CLK1, DIO1);
         clearDisplay(CLK2, DIO2);
         clearDisplay(CLK3, DIO3);
@@ -763,7 +757,7 @@ void loop() {
     case STATE_CARD_INVALID_DISPLAY: {
       if (now - stateStartTime >= 2000) {
         showDash(CLK1, DIO1);
-        ledBlink(ledCard, 2.0);
+        ledBlink(IDX_CARD, 2.0);
         state = STATE_WAIT_CARD;
         stateStartTime = now;
       }
@@ -777,7 +771,7 @@ void loop() {
         if (refDist <= 0) refDist = getReference();
         if (objectAtScanner()) {
           Serial.println("OBJECT_DETECTED");
-          ledBlink(ledScan, 0.5);
+          ledBlink(IDX_SCAN, 0.5);
           state = STATE_REF_DIST;
           stateStartTime = now;
         }
@@ -846,7 +840,7 @@ void loop() {
     }
 
     case STATE_SCAN_DONE: {
-      ledSolid(ledScan);
+      ledSolid(IDX_SCAN);
       digitalWrite(PIN_BUZZER, HIGH);
       delay(200);
       digitalWrite(PIN_BUZZER, LOW);
@@ -872,9 +866,9 @@ void loop() {
     }
 
     case STATE_TRANSFER_TO_SCALE: {
-      ledOff(ledScan);
-      ledBlink(ledScan, 0.25);
-      ledBlink(ledWeigh, 0.25);
+      ledOff(IDX_SCAN);
+      ledBlink(IDX_SCAN, 0.25);
+      ledBlink(IDX_WEIGH, 0.25);
       conveyorRunMs(120, 4000, true);
       state = STATE_WAIT_ON_SCALE;
       stateStartTime = now;
@@ -884,7 +878,7 @@ void loop() {
     case STATE_WAIT_ON_SCALE: {
       float f = measureFreq();
       if (isObjectOnScale(f)) {
-        ledBlink(ledWeigh, 1.0);
+        ledBlink(IDX_WEIGH, 1.0);
         state = STATE_WEIGHING;
         stateStartTime = now;
         weightStableStart = 0;
@@ -931,7 +925,7 @@ void loop() {
     }
 
     case STATE_WEIGH_DONE: {
-      ledBlink(ledWeigh, 0.25);
+      ledBlink(IDX_WEIGH, 0.25);
       int wr = ((int)(measuredWeight + 5)) / 10 * 10;
       showInt(CLK1, DIO1, wr);
       if (beepCount < 3) {
@@ -1035,9 +1029,9 @@ void loop() {
 
       delay(5000);
 
-      ledOff(ledCard);
-      ledOff(ledScan);
-      ledOff(ledWeigh);
+      ledOff(IDX_CARD);
+      ledOff(IDX_SCAN);
+      ledOff(IDX_WEIGH);
       digitalWrite(PIN_LED_KETTLE, LOW);
       buzzerOff();
       programNum = 0;
@@ -1055,7 +1049,7 @@ void loop() {
       refDist = 0;
       servoY.writeMicroseconds(1000);
 
-      ledBlink(ledCard, 2.0);
+      ledBlink(IDX_CARD, 2.0);
       showDash(CLK1, DIO1);
       clearDisplay(CLK2, DIO2);
       clearDisplay(CLK3, DIO3);
