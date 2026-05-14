@@ -446,10 +446,22 @@ void updateFanSensor() {
   if (val < sensorMin) sensorMin = val;
 }
 
-float weightToTargetRPS(float w) {
+float weightFromCard(char prog) {
+  if (prog == '1') return 300.0;
+  if (prog == '2') return 500.0;
+  if (prog == '3') return 700.0;
+  return 300.0;
+}
   if (w < 200) return 1.0;
   if (w > 800) return 20.0;
   return 1.0 + (w - 200.0) * (19.0 / 600.0);
+}
+
+float weightFromCard(char prog) {
+  if (prog == '1') return 300.0;
+  if (prog == '2') return 500.0;
+  if (prog == '3') return 700.0;
+  return 300.0;
 }
 
 float weightToTargetTemp(float w) {
@@ -868,59 +880,32 @@ void loop() {
     case STATE_TRANSFER_TO_SCALE: {
       ledOff(IDX_SCAN);
       ledBlink(IDX_SCAN, 0.25);
-      ledBlink(IDX_WEIGH, 0.25);
+      ledBlink(IDX_WEIGH, 1.0);
       conveyorRunMs(120, 4000, true);
-      state = STATE_WAIT_ON_SCALE;
+
+      measuredWeight = weightFromCard(programNum);
+      targetTemp     = weightToTargetTemp(measuredWeight);
+      targetRPS      = weightToTargetRPS(measuredWeight);
+      Serial.print("W_FROM_CARD=");
+      Serial.print(measuredWeight);
+      Serial.print(" TGT_TEMP=");
+      Serial.print(targetTemp);
+      Serial.print(" TGT_RPS=");
+      Serial.println(targetRPS);
+
+      state = STATE_WEIGH_DONE;
       stateStartTime = now;
+      beepCount = 0;
       break;
     }
 
     case STATE_WAIT_ON_SCALE: {
-      float f = measureFreq();
-      if (isObjectOnScale(f)) {
-        ledBlink(IDX_WEIGH, 1.0);
-        state = STATE_WEIGHING;
-        stateStartTime = now;
-        weightStableStart = 0;
-        lastWeight = 0;
-        Serial.println("BOX_ON_SCALE");
-      } else {
-        if (now - stateStartTime > 30000) {
-          Serial.println("SCALE_TIMEOUT");
-          state = STATE_DONE;
-        }
-      }
+      state = STATE_WEIGH_DONE;
       break;
     }
 
     case STATE_WEIGHING: {
-      float freq = measureFreq();
-      float weight = freqToWeight(freq);
-      if (weight < 0) weight = 0;
-      if (weight > 800) weight = 800;
-      int wr = ((int)(weight + 5)) / 10 * 10;
-
-      showInt(CLK1, DIO1, wr);
-
-      if (fabs(weight - lastWeight) < WEIGHT_THRESHOLD) {
-        if (weightStableStart == 0) weightStableStart = now;
-        if (now - weightStableStart >= WEIGHT_STABLE_TIME && weight > MIN_WEIGHT) {
-          measuredWeight = weight;
-          targetTemp = weightToTargetTemp(measuredWeight);
-          targetRPS = weightToTargetRPS(measuredWeight);
-          Serial.print("W=");
-          Serial.print(measuredWeight);
-          Serial.print(" TGT_TEMP=");
-          Serial.print(targetTemp);
-          Serial.print(" TGT_RPS=");
-          Serial.println(targetRPS);
-          state = STATE_WEIGH_DONE;
-          stateStartTime = now;
-        }
-      } else {
-        weightStableStart = 0;
-      }
-      lastWeight = weight;
+      state = STATE_WEIGH_DONE;
       break;
     }
 
