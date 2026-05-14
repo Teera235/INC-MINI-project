@@ -452,16 +452,11 @@ float weightFromCard(char prog) {
   if (prog == '3') return 700.0;
   return 300.0;
 }
+
+float weightToTargetRPS(float w) {
   if (w < 200) return 1.0;
   if (w > 800) return 20.0;
   return 1.0 + (w - 200.0) * (19.0 / 600.0);
-}
-
-float weightFromCard(char prog) {
-  if (prog == '1') return 300.0;
-  if (prog == '2') return 500.0;
-  if (prog == '3') return 700.0;
-  return 300.0;
 }
 
 float weightToTargetTemp(float w) {
