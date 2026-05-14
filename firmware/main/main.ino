@@ -235,6 +235,15 @@ void showE(int clk, int dio) {
   writeRaw(clk, dio, SEG_BLANK, SEG_BLANK, SEG_BLANK, SEG_E);
 }
 
+void showPattern4(int clk, int dio, int *pat, int len) {
+  int start = (len > 4) ? len - 4 : 0;
+  uint8_t b[4] = { SEG_BLANK, SEG_BLANK, SEG_BLANK, SEG_BLANK };
+  for (int i = 0; i < 4 && start + i < len; i++) {
+    b[i] = pat[start + i] ? seg[1] : seg[0];
+  }
+  writeRaw(clk, dio, b[0], b[1], b[2], b[3]);
+}
+
 void showInt(int clk, int dio, int val) {
   if (val > 9999) val = 9999;
   if (val < 0) val = 0;
@@ -644,6 +653,8 @@ int readCardOnce() {
       indexCounter = 0;
       colorSum = 0;
       colorCount = 0;
+      clearDisplay(CLK2, DIO2);
+      showInt(CLK3, DIO3, 0);
     }
     lastClockState = currentClock;
     return 0;
@@ -668,6 +679,14 @@ int readCardOnce() {
     colorSum += colorValue;
     colorCount++;
     indexCounter++;
+
+    showPattern4(CLK2, DIO2, pattern, indexCounter);
+    showInt(CLK3, DIO3, indexCounter);
+
+    Serial.print("BIT[");
+    Serial.print(indexCounter - 1);
+    Serial.print("]=");
+    Serial.println(pattern[indexCounter - 1]);
   }
   lastClockState = currentClock;
 
