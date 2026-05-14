@@ -653,8 +653,10 @@ int readCardOnce() {
       indexCounter = 0;
       colorSum = 0;
       colorCount = 0;
+      digitalWrite(PIN_LED_KETTLE, HIGH);
       clearDisplay(CLK2, DIO2);
       showInt(CLK3, DIO3, 0);
+      Serial.println("CARD_IN");
     }
     lastClockState = currentClock;
     return 0;
@@ -665,7 +667,9 @@ int readCardOnce() {
       if (removalTimer == 0) removalTimer = millis();
       if (millis() - removalTimer > 500) {
         Serial.println("CARD_REMOVED_EARLY");
+        digitalWrite(PIN_LED_KETTLE, LOW);
         resetCardState();
+        lastClockState = currentClock;
         return 0;
       }
     } else {
@@ -673,20 +677,27 @@ int readCardOnce() {
     }
   }
 
-  if (currentClock == HIGH && lastClockState == LOW) {
-    pattern[indexCounter] = (analogRead(PIN_LDR_DATA) > THRESHOLD_DATA) ? 1 : 0;
-    int colorValue = analogRead(PIN_LDR_COLOR);
-    colorSum += colorValue;
-    colorCount++;
-    indexCounter++;
+  if (cardInserted) {
+    if (currentClock == HIGH && lastClockState == LOW) {
+      int rawData = analogRead(PIN_LDR_DATA);
+      pattern[indexCounter] = (rawData > THRESHOLD_DATA) ? 1 : 0;
+      int colorValue = analogRead(PIN_LDR_COLOR);
+      colorSum += colorValue;
+      colorCount++;
 
-    showPattern4(CLK2, DIO2, pattern, indexCounter);
-    showInt(CLK3, DIO3, indexCounter);
+      Serial.print("Step ");
+      Serial.print(indexCounter);
+      Serial.print(" Saved=");
+      Serial.print(pattern[indexCounter]);
+      Serial.print(" Raw=");
+      Serial.print(rawData);
+      Serial.print(" Color=");
+      Serial.println(colorValue);
 
-    Serial.print("BIT[");
-    Serial.print(indexCounter - 1);
-    Serial.print("]=");
-    Serial.println(pattern[indexCounter - 1]);
+      indexCounter++;
+      showPattern4(CLK2, DIO2, pattern, indexCounter);
+      showInt(CLK3, DIO3, indexCounter);
+    }
   }
   lastClockState = currentClock;
 
@@ -695,16 +706,26 @@ int readCardOnce() {
     if      (comparePattern(pattern, CardA)) { programNum = '1'; result = 1; }
     else if (comparePattern(pattern, CardB)) { programNum = '2'; result = 1; }
     else if (comparePattern(pattern, CardC)) { programNum = '3'; result = 1; }
-    else if (isReversedPattern(pattern))     { programNum = 'E'; result = 2; }
     else                                     { programNum = 'E'; result = 2; }
 
-    Serial.print("CARD_READ=");
+    int avgColor = (colorCount > 0) ? (int)(colorSum / colorCount) : 0;
+    Serial.print("PATTERN=");
     Serial.println(programNum);
+    Serial.print("AvgColor=");
+    Serial.print(avgColor);
+    Serial.print(" -> ");
+    if (avgColor > 40)      Serial.println("White");
+    else if (avgColor < 30) Serial.println("Black");
+    else                    Serial.println("Yellow");
 
-    while (analogRead(PIN_LDR_CLOCK) < THRESHOLD_CARD_OUT) {
+    Serial.println("Please remove card...");
+    while (analogRead(PIN_LDR_CLOCK) < 900) {
       delay(10);
     }
+
+    digitalWrite(PIN_LED_KETTLE, LOW);
     resetCardState();
+    Serial.println("System Reset. Waiting for next card");
     return result;
   }
   return 0;
