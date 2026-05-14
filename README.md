@@ -1,6 +1,6 @@
 # INC-MINI-Project
 
-An integrated Arduino-based automation cell that authenticates an access card, scans a part for height and length, weighs it via an LC oscillator with FFT-based frequency estimation, drives the part to a target temperature with closed-loop fan and heater control, and dispatches it on a conveyor.
+An integrated Arduino-based automation cell that authenticates an access card, scans a box for three dimensions using a single distance sensor, weighs it via an LC oscillator with FFT-based frequency estimation, drives a fan proportional to weight, heats water to a target temperature, and dispatches the box on a conveyor.
 
 The system runs as a single deterministic state machine on an Arduino Mega 2560.
 
@@ -11,6 +11,7 @@ The system runs as a single deterministic state machine on an Arduino Mega 2560.
 - [Overview](#overview)
 - [Hardware](#hardware)
 - [Pin Map](#pin-map)
+- [Card Types](#card-types)
 - [Process Flow](#process-flow)
 - [State Machine](#state-machine)
 - [Subsystems](#subsystems)
@@ -19,31 +20,35 @@ The system runs as a single deterministic state machine on an Arduino Mega 2560.
 - [Calibration](#calibration)
 - [Tools](#tools)
 - [Test Sketches](#test-sketches)
-- [License](#license)
 
 ---
 
 ## Overview
 
 ```mermaid
-%%{init: {'theme':'base','themeVariables':{'primaryColor':'#ffffff','primaryBorderColor':'#000000','primaryTextColor':'#000000','lineColor':'#000000','secondaryColor':'#f5f5f5','tertiaryColor':'#ffffff','background':'#ffffff','clusterBkg':'#fafafa','clusterBorder':'#000000'}}}%%
+%%{init: {'theme':'base','themeVariables':{'primaryColor':'#ffffff','primaryBorderColor':'#000000','primaryTextColor':'#000000','lineColor':'#000000','secondaryColor':'#f5f5f5','clusterBkg':'#fafafa','clusterBorder':'#000000'}}}%%
 flowchart LR
-    A[Card Reader] --> B[Distance Scan H]
-    B --> C[Weight Measurement]
-    C --> D[Heater + Fan PID]
-    D --> E[Conveyor Dispatch]
+    A[Card Reader] --> B[3D Dimension Scan]
+    B --> C[Conveyor Transfer]
+    C --> D[Weight Measurement]
+    D --> E[Fan Speed Control]
+    D --> F[Water Heating]
+    E --> G[Done]
+    F --> G
 
     classDef node fill:#ffffff,stroke:#000000,stroke-width:1.5px,color:#000000;
-    class A,B,C,D,E node;
+    class A,B,C,D,E,F,G node;
 ```
 
-| Stage | Purpose | Primary Sensors / Actuators |
+| Stage | Spec requirement | Implementation |
 |---|---|---|
-| Card | Authenticate card type A, B, or C and identify color | LDR clock, data, color, indicator LED |
-| Scan | Measure object height H | VL53L0X, X-axis servo |
-| Weight | Estimate part weight from oscillator frequency | LC tank into A0, FFT |
-| Thermal | Drive temperature to target with active cooling | DS18B20, relay heater, PWM fan with PID |
-| Dispatch | Step-pattern conveyor to deliver finished part | DC motor with H-bridge |
+| Card | Swipe card A/B/C, display 1/2/3, beep on success, display E on reverse | LDR clock/data/color, pattern match |
+| Scan | Measure W, L, H with one sensor, display each in mm resolution | VL53L0X + X servo sweep, Y servo rotates box 0/90/180 deg |
+| Transfer | Move box from scan platform to scale automatically | DC motor conveyor 4 s |
+| Weight | Estimate weight 200-800 g, display in 10 g resolution | LC oscillator + FFT, zero-offset calibration at boot |
+| Fan | Speed proportional to weight: 200 g = 1 RPS, 800 g = 20 RPS | Timer1 10-bit PWM, PID, display RPM |
+| Heating | Target temp proportional to weight: 200 g = 35 C, 800 g = 50 C | DS18B20, relay, display target and current temp |
+| Dispatch | Conveyor step-pattern after heating complete | DC motor 15-cycle step pattern |
 
 ---
 
@@ -55,12 +60,15 @@ flowchart LR
 - LC oscillator front-end into ADC pin A0
 - Hall or optical fan tachometer into A2
 - 4-wire PC fan driven from Timer1 10-bit fast PWM at 31.25 kHz
-- SSR or mechanical relay driving a heating element
+- SSR or mechanical relay driving a 220 V 150 W kettle
 - DC gear motor on H-bridge (ENA, IN1, IN2)
-- Two hobby servos for X scan axis and Y rotation
-- LDR-based card reader with three slots (clock, data, color)
+- Servo X for distance scan sweep (60-120 degrees)
+- Servo Y for box rotation (0, 90, 180 degrees)
+- LDR-based card reader with three slots (clock A8, data A9, color A10)
 - Three TM1637 4-digit 7-segment displays
-- Buzzer, three status LEDs, one card indicator LED
+- Buzzer
+- LED card indicator (D8), LED scan indicator (D7), LED weigh indicator (D6)
+- LED kettle status (A3)
 
 ---
 
@@ -72,20 +80,24 @@ flowchart LR
     subgraph MCU[Arduino Mega 2560]
       M1[A0 FFT ADC]
       M2[A2 Fan Tacho]
-      M3[A8..A10 LDR Card]
-      M4[D11 PWM Fan]
-      M5[D10 DS18B20]
-      M6[D12 Relay]
-      M7[D9 Buzzer]
-      M8[D8..D6 LEDs]
-      M9[D5..D3 Motor]
-      M10[D44..D45 Servos]
-      M11[D22..D32 TM1637]
-      M12[A3 Card LED]
+      M3[A8 LDR Clock]
+      M4[A9 LDR Data]
+      M5[A10 LDR Color]
+      M6[A3 Kettle LED]
+      M7[D11 PWM Fan]
+      M8[D10 DS18B20]
+      M9[D12 Relay]
+      M10[D9 Buzzer]
+      M11[D8 LED Card]
+      M12[D7 LED Scan]
+      M13[D6 LED Weigh]
+      M14[D5..D3 Motor]
+      M15[D44..D45 Servos]
+      M16[D22..D32 TM1637]
     end
 
     classDef mcu fill:#ffffff,stroke:#000000,stroke-width:1.2px,color:#000000;
-    class M1,M2,M3,M4,M5,M6,M7,M8,M9,M10,M11,M12 mcu;
+    class M1,M2,M3,M4,M5,M6,M7,M8,M9,M10,M11,M12,M13,M14,M15,M16 mcu;
 ```
 
 | Function | Pin | Notes |
@@ -95,24 +107,44 @@ flowchart LR
 | Card LDR clock | A8 | hole pattern timing |
 | Card LDR data | A9 | hole pattern bits |
 | Card LDR color | A10 | color identification and removal detection |
-| Card indicator LED | A3 | active during read |
-| PWM fan | D11 | Timer1 OC1A, 10-bit fast PWM |
+| Kettle status LED | A3 | HIGH while relay is ON |
+| PWM fan | D11 | Timer1 OC1A, 10-bit fast PWM 31.25 kHz |
 | DS18B20 | D10 | OneWire bus |
-| Relay heater | D12 | active LOW |
-| Buzzer | D9 | status tone |
-| LED card A | D8 | indicator |
-| LED card B | D7 | indicator |
-| LED card C | D6 | indicator |
+| Relay kettle | D12 | active LOW |
+| Buzzer | D9 | status tones |
+| LED card system | D8 | blink 2 Hz idle, solid during read, blink 2 Hz after success |
+| LED scan system | D7 | blink 0.25 Hz waiting, blink 0.5 Hz scanning, solid done |
+| LED weigh system | D6 | off until box on scale, blink 1 Hz weighing, blink 0.25 Hz done |
 | Motor ENA | D5 | PWM speed |
 | Motor IN1 | D4 | direction |
 | Motor IN2 | D3 | direction |
-| Servo X | D44 | scan axis |
-| Servo Y | D45 | rotation axis (reserved) |
+| Servo X | D44 | scan sweep axis |
+| Servo Y | D45 | box rotation axis |
 | Display 1 CLK / DIO | D22 / D24 | TM1637 |
 | Display 2 CLK / DIO | D26 / D28 | TM1637 |
 | Display 3 CLK / DIO | D30 / D32 | TM1637 |
 
-The sketch includes pin definitions at the top of `firmware/main/main.ino`. Adjust them there if the wiring on your bench differs.
+---
+
+## Card Types
+
+```mermaid
+%%{init: {'theme':'base','themeVariables':{'primaryColor':'#ffffff','primaryBorderColor':'#000000','primaryTextColor':'#000000','lineColor':'#000000','secondaryColor':'#f5f5f5','clusterBkg':'#fafafa','clusterBorder':'#000000'}}}%%
+flowchart LR
+    CA[Card A - White - 200 to 400 g] --> P1[Program 1]
+    CB[Card B - Yellow - 400 to 600 g] --> P2[Program 2]
+    CC[Card C - Green - 600 to 800 g] --> P3[Program 3]
+
+    classDef node fill:#ffffff,stroke:#000000,stroke-width:1.5px,color:#000000;
+    class CA,CB,CC,P1,P2,P3 node;
+```
+
+| Card | Color | Weight range | Display | Pattern |
+|---|---|---|---|---|
+| A | White | 200-400 g | 1 | 0101010111 |
+| B | Yellow | 400-600 g | 2 | 0101100111 |
+| C | Green | 600-800 g | 3 | 0100110111 |
+| Reversed | any | - | E | any reversed pattern |
 
 ---
 
@@ -124,23 +156,27 @@ sequenceDiagram
     autonumber
     participant U as Operator
     participant CR as Card Reader
-    participant DS as Distance Scanner
-    participant WS as Weight Sensor
-    participant TC as Thermal Controller
+    participant DS as Dimension Scanner
     participant CV as Conveyor
+    participant WS as Weight Scale
+    participant TC as Thermal Controller
 
     U->>CR: Swipe card
-    CR-->>U: Card type A or B or C with color
-    CR->>DS: Trigger scan
-    DS->>DS: Measure reference, detect object
-    DS->>DS: Sweep X servo, record max height
-    DS->>WS: Hand off to weight stage
-    WS->>WS: Wait for stable frequency
-    WS->>TC: Provide weight, derive target temperature
+    CR-->>U: Display 1/2/3 and beep, or E on reverse
+    CR->>DS: Trigger scan sequence
+    DS->>DS: Ref distance, scan dim1 at 0 deg
+    DS->>DS: Rotate Y to 90 deg, scan dim2
+    DS->>DS: Rotate Y to 180 deg, scan dim3
+    DS-->>U: Display W L H on three 7-seg, double beep
+    DS->>CV: Trigger transfer
+    CV->>WS: Box arrives on scale
+    WS->>WS: Detect presence, wait for stable weight
+    WS-->>U: Display weight, beep 3 times
+    WS->>TC: Provide weight, compute target temp and fan RPS
     TC->>TC: Heat with relay, regulate fan via PID
-    TC-->>U: Buzzer at target reached
-    TC->>CV: Trigger dispatch
-    CV-->>U: Part delivered
+    TC-->>U: Continuous beep while heating, display temp and RPM
+    TC-->>U: Long beep 3 s at target, relay off
+    TC-->>U: Final triple beep, cycle complete
 ```
 
 ---
@@ -152,77 +188,114 @@ sequenceDiagram
 stateDiagram-v2
     direction LR
     [*] --> FAN_CALIB
-    FAN_CALIB --> WEIGHT_ZERO_CALIB: tachometer baseline ready
+    FAN_CALIB --> WEIGHT_ZERO_CALIB: fan sensor ready
     WEIGHT_ZERO_CALIB --> WAIT_CARD: zero offset stored
-    WAIT_CARD --> REF_DIST: card pattern matched
-    REF_DIST --> WAIT_OBJECT: reference distance captured
-    WAIT_OBJECT --> SCAN_HEIGHT: object confirmed
-    SCAN_HEIGHT --> WAIT_WEIGHT
-    WAIT_WEIGHT --> HEATING: weight stable for 3 s
-    HEATING --> CONVEYOR: temperature reached
-    CONVEYOR --> DONE
+    WAIT_CARD --> CARD_VALID_DISPLAY: pattern matched
+    WAIT_CARD --> CARD_INVALID_DISPLAY: reversed or unknown
+    CARD_INVALID_DISPLAY --> WAIT_CARD: 2 s timeout
+    CARD_VALID_DISPLAY --> WAIT_OBJECT: 2 s display
+    WAIT_OBJECT --> REF_DIST: object detected
+    REF_DIST --> SCAN_DIM1
+    SCAN_DIM1 --> ROTATE_TO_DIM2
+    ROTATE_TO_DIM2 --> SCAN_DIM2
+    SCAN_DIM2 --> ROTATE_TO_DIM3
+    ROTATE_TO_DIM3 --> SCAN_DIM3
+    SCAN_DIM3 --> SCAN_DONE
+    SCAN_DONE --> TRANSFER_TO_SCALE
+    TRANSFER_TO_SCALE --> WAIT_ON_SCALE
+    WAIT_ON_SCALE --> WEIGHING: box detected on scale
+    WEIGHING --> WEIGH_DONE: weight stable 3 s
+    WEIGH_DONE --> HEATING: after beep sequence
+    HEATING --> BOIL_COMPLETE: temperature reached
+    BOIL_COMPLETE --> DONE: final beep
     DONE --> WAIT_CARD: cycle reset
 ```
 
-The full enumeration lives in `firmware/main/main.ino`:
+Full enum in `firmware/main/main.ino`:
 
 ```
-STATE_INIT, STATE_FAN_CALIB, STATE_WEIGHT_ZERO_CALIB,
-STATE_WAIT_CARD, STATE_REF_DIST, STATE_WAIT_OBJECT,
-STATE_SCAN_HEIGHT, STATE_WAIT_WEIGHT, STATE_HEATING,
-STATE_CONVEYOR, STATE_DONE
+STATE_FAN_CALIB, STATE_WEIGHT_ZERO_CALIB,
+STATE_WAIT_CARD, STATE_CARD_VALID_DISPLAY, STATE_CARD_INVALID_DISPLAY,
+STATE_WAIT_OBJECT, STATE_REF_DIST,
+STATE_SCAN_DIM1, STATE_ROTATE_TO_DIM2, STATE_SCAN_DIM2,
+STATE_ROTATE_TO_DIM3, STATE_SCAN_DIM3, STATE_SCAN_DONE,
+STATE_TRANSFER_TO_SCALE, STATE_WAIT_ON_SCALE,
+STATE_WEIGHING, STATE_WEIGH_DONE,
+STATE_HEATING, STATE_BOIL_COMPLETE, STATE_DONE
 ```
 
 ---
 
 ## Subsystems
 
+### Card Reader
+
+Three LDRs read clock, data, and color tracks from a swipe card. The clock channel triggers on a falling edge below ADC 500. Ten data bits are sampled on each clock rising edge and compared against patterns for cards A, B, and C. A reversed card is detected by checking all three patterns against the bit-reversed input. A successful match shows 1/2/3 on display 1 with a short beep. A reversed or unknown card shows E with a long beep. A removal protection timer resets the reader if the color channel rises during a read.
+
+LED card behavior:
+- Idle: blink 2 Hz, display shows dash
+- Card inserted: solid
+- Read success: blink 2 Hz, display shows 1/2/3
+- Read error: display shows E, returns to idle after 2 s
+
+### Dimension Scanner
+
+The VL53L0X measures distance with millimeter resolution. A reference background is averaged over ten stable reads. An object is confirmed when two consecutive deltas exceed 1 cm. The X servo sweeps from 60 to 120 degrees and back, recording the maximum protrusion above the reference plane. The Y servo rotates the box platform to 0, 90, and 180 degrees to expose three orthogonal faces to the same sensor. Results are displayed on all three 7-segment displays in centimeters with 1 mm resolution (format XX.XX).
+
+LED scan behavior:
+- Waiting for box: blink 0.25 Hz
+- Scanning: blink 0.5 Hz with continuous buzzer
+- Done: solid, double beep
+
 ### Weight Estimation
 
-The LC oscillator output is sampled at A0 with a fixed period of 500 microseconds. A 128-point FFT extracts the dominant tone, refined by parabolic peak interpolation. An exponential moving average smooths frequency between cycles.
+The LC oscillator output is sampled at A0 with a 500 microsecond period. A 128-point FFT with Hamming windowing extracts the dominant tone, refined by parabolic peak interpolation. An exponential moving average smooths frequency between cycles.
 
-The frequency-to-weight mapping uses a quadratic model fitted from bench data:
-
-```
-f = A * w^2 + B * w + C
-A = 3.768e-4
-B = -2.523e-3
-C = 451.32
-```
-
-Inversion uses the closed form
+A four-second zero-offset routine runs at boot. The mean frequency at zero load is stored as `zeroFreq`. Every subsequent reading subtracts `zeroOffset = zeroFreq - MODEL_C` before the inverse quadratic mapping:
 
 ```
-w = (-B + sqrt(B^2 - 4 * A * (C - f))) / (2 * A)
+w = (-B + sqrt(B^2 - 4A(C - f_corrected))) / (2A)
+A = 3.768e-4,  B = -2.523e-3,  C = 451.32
 ```
 
-A four-second zero-offset routine runs at boot. The mean frequency at zero load is captured and stored as `zeroOffset`, which is subtracted from every subsequent reading before the inverse mapping is applied.
+Box presence on the scale is detected when the measured frequency deviates from `zeroFreq` by more than 2 Hz.
+
+Weight is displayed in 10 g resolution. After three stable seconds, three beeps confirm the reading.
+
+LED weigh behavior:
+- No box: off
+- Box present, weighing: blink 1 Hz
+- Weight confirmed: blink 0.25 Hz, beep 3 times
 
 ### Fan Speed Control
 
-A 10-bit fast PWM on Timer1 drives the fan at 31.25 kHz to keep audible noise out of the motor. Tachometer pulses are detected on A2 with adaptive thresholding and hysteresis. Pulses convert to revolutions per second using the configured pole count. A discrete PID loop runs every 20 ms with anti-windup on the integral term.
+Fan target RPS is mapped linearly from weight:
+
+```
+200 g -> 1 RPS
+800 g -> 20 RPS
+targetRPS = 1 + (weight - 200) * 19 / 600
+```
+
+A 10-bit fast PWM on Timer1 drives the fan at 31.25 kHz. Tachometer pulses on A2 are detected with adaptive hysteresis. A discrete PID loop runs every 20 ms with anti-windup. RPM (= RPS x 60) is displayed on display 3 during heating.
 
 ### Thermal Control
 
-Temperature is read from a DS18B20 over OneWire once per second. The relay drives a heater with a small hysteresis band defined by `marginOn` and `marginOff` to avoid chattering. The target is derived from measured weight:
+Target temperature is mapped linearly from weight:
 
 ```
-T_target = 0.025 * weight + 30
+200 g -> 35 C
+800 g -> 50 C
+targetTemp = 35 + (weight - 200) * 15 / 600
 ```
 
-The buzzer pulses at 300 ms while heating and emits a 3-second tone when the target is reached.
-
-### Distance and Geometry
-
-The VL53L0X provides millimeter-resolution distance. A reference background distance is averaged over ten stable reads. An object is confirmed when a single delta exceeds 1 cm. The X servo sweeps from 60 to 120 degrees and back, capturing the maximum vertical extent relative to the reference plane. The Y servo is parked at 1500 microseconds and reserved for future rotation features.
-
-### Card Reader
-
-Two LDRs read clock and data tracks punched into a swipe card, while a third LDR senses background color and detects card removal. The clock channel triggers on a falling edge below 500 ADC counts. Ten data bits are sampled on each clock rising edge and compared against three reference patterns A, B, and C. A successful match latches the corresponding indicator LED. If the color channel rises during a read, a 500 ms timer triggers a removal protection reset.
+DS18B20 is read once per second. The relay drives the kettle with a 1.0 / 0.3 degree hysteresis band. The kettle status LED mirrors the relay state. A continuous buzzer tone sounds during heating. When the target is reached the relay opens, the LED turns off, and a 3-second long beep fires. The current temperature remains on display 2 after heating ends.
 
 ### Conveyor
 
-The conveyor runs a step-pattern of 15 cycles. Each cycle drives the DC motor backward then forward at PWM 100 for 250 ms with 300 ms rest in between. After the cycles complete, a final slow backward run at PWM 70 for 2 seconds delivers the finished part. The fan PID and tachometer keep running during dispatch.
+Transfer from scan platform to scale: forward at PWM 120 for 4 seconds.
+
+Dispatch after heating: 15 step-cycles of backward 250 ms then forward 250 ms at PWM 100, followed by a final backward run at PWM 70 for 2 seconds. The fan PID keeps running during all conveyor operations.
 
 ---
 
@@ -259,16 +332,16 @@ inc-mini-project/
 
 ## Build and Upload
 
-The production sketch is `firmware/main/main.ino`. Open it from the Arduino IDE or `arduino-cli` and target an Arduino Mega 2560.
+Open `firmware/main/main.ino` in the Arduino IDE and target Arduino Mega 2560.
 
 Required libraries:
 
 - `arduinoFFT` by Enrique Condes
 - `OneWire` by Paul Stoffregen
 - `Adafruit_VL53L0X` by Adafruit
-- `Servo` (bundled with the IDE)
+- `Servo` (bundled with IDE)
 
-Example with `arduino-cli`:
+With `arduino-cli`:
 
 ```bash
 arduino-cli core install arduino:avr
@@ -277,60 +350,44 @@ arduino-cli compile --fqbn arduino:avr:mega firmware/main
 arduino-cli upload --fqbn arduino:avr:mega -p COM5 firmware/main
 ```
 
-Replace `COM5` with the serial port assigned to your board. Serial console runs at 115200 baud.
+Serial monitor at 115200 baud shows all state transitions and measured values.
 
 ---
 
 ## Calibration
 
-The system performs two automatic calibrations at boot.
-
-| Stage | Duration | What it measures | Where it is stored |
+| Stage | Duration | What it measures | Variable |
 |---|---|---|---|
-| Fan tachometer baseline | 3 s | min and max ADC values on A2 | `sensorMin`, `sensorMax` |
-| Weight zero offset | 4 s | mean FFT frequency with no load | `zeroFreq`, `zeroOffset` |
+| Fan tachometer | 3 s | min and max ADC on A2 | `sensorMin`, `sensorMax` |
+| Weight zero offset | 4 s | mean FFT frequency at zero load | `zeroFreq`, `zeroOffset` |
 
-Total cold-start time is approximately 7 seconds before the cell accepts a card.
+Total cold-start time before the cell accepts a card is approximately 7 seconds.
 
-To re-fit the weight model, capture frequency and weight pairs with `tools/collect_training_data.py`, run a polynomial fit in `tools/plot_graph.py`, and update `MODEL_A`, `MODEL_B`, `MODEL_C` near the top of `firmware/main/main.ino`.
+To re-fit the weight model, capture frequency and weight pairs with `tools/collect_training_data.py`, run `tools/plot_graph.py` to fit the quadratic, and update `MODEL_A`, `MODEL_B`, `MODEL_C` in `firmware/main/main.ino`.
 
 ---
 
 ## Tools
 
-The `tools/` folder contains companion Python scripts. They are optional and run on a host PC connected to the Arduino over serial.
-
 | Script | Purpose |
 |---|---|
-| `collect_training_data.py` | Interactive data collector. Records peak frequency, area under curve, rise and decay times against a known weight into a CSV file. |
-| `plot_graph.py` | Loads a captured CSV, fits an exponential decay model, and prints constants ready to paste into the firmware. |
-| `realtime_plot.py` | Live plot of frequency and inferred weight using a cubic calibration model. Useful when tuning the LC front-end. |
-
-Dependencies:
+| `collect_training_data.py` | Records peak frequency and timing features against known weights into CSV |
+| `plot_graph.py` | Fits exponential decay and prints constants for firmware |
+| `realtime_plot.py` | Live frequency and weight plot using cubic calibration model |
 
 ```bash
 pip install pyserial numpy pandas matplotlib scipy
 ```
 
-Edit the `PORT` constant inside each script to match your serial port before running.
+Edit `PORT` in each script before running.
 
 ---
 
 ## Test Sketches
 
-Each subfolder under `firmware/tests/` is a self-contained sketch that isolates a single subsystem. Use these to validate hardware in stages before flashing the integrated firmware.
-
 | Sketch | Subsystem | Notes |
 |---|---|---|
-| `test_weight_fft` | LC oscillator and FFT | Streams filtered frequency, baseline, and delta over serial |
-| `test_weight_display` | Quadratic weight model and TM1637 | Includes drift compensation and 7-segment output |
-| `test_weight_counter` | Peak-to-peak amplitude counter | Bench utility used to cross-check the FFT path |
-| `test_motor` | Fan PID and 10-bit PWM | Reports measured RPS and target RPS over serial |
-
-Open each as its own sketch in the Arduino IDE.
-
----
-
-## License
-
-Add a license file to clarify reuse terms. MIT or Apache 2.0 are common choices for open hardware projects.
+| `test_weight_fft` | LC oscillator and FFT | Streams filtered frequency, baseline, and delta |
+| `test_weight_display` | Quadratic weight model and TM1637 | Includes drift compensation |
+| `test_weight_counter` | Peak-to-peak amplitude counter | Cross-check for FFT path |
+| `test_motor` | Fan PID and 10-bit PWM | Reports measured and target RPS |

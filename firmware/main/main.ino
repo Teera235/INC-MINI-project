@@ -11,15 +11,15 @@
 #define PIN_LDR_CLOCK    A8
 #define PIN_LDR_DATA     A9
 #define PIN_LDR_COLOR    A10
-#define PIN_LED_CARD     A3
+#define PIN_LED_KETTLE   A3
 
 #define PIN_PWM_FAN      11
 #define PIN_DS18B20      10
 #define PIN_RELAY        12
 #define PIN_BUZZER       9
-#define PIN_LED1         8
-#define PIN_LED2         7
-#define PIN_LED3         6
+#define PIN_LED_CARD     8
+#define PIN_LED_SCAN     7
+#define PIN_LED_WEIGH    6
 
 #define PIN_MOTOR_ENA    5
 #define PIN_MOTOR_IN1    4
@@ -52,9 +52,10 @@ const float MODEL_C = 451.32;
 
 float zeroFreq = 0;
 float zeroOffset = 0;
+const float SCALE_PRESENCE_DELTA = 2.0;
 
 const int POLES = 2;
-float targetRPS = 20.0;
+float targetRPS = 1.0;
 int sensorMax = 0;
 int sensorMin = 1023;
 bool fanCalibrated = false;
@@ -69,7 +70,7 @@ float kI = 1.0;
 float kD = 0.05;
 float errorPrev = 0;
 float integral = 0;
-float pwmValue = 400.0;
+float pwmValue = 200.0;
 unsigned long lastPIDTime = 0;
 
 OneWire ds(PIN_DS18B20);
@@ -77,8 +78,6 @@ float targetTemp = 0;
 float currentTemp = 0;
 float marginOn = 1.0;
 float marginOff = 0.3;
-unsigned long lastBeep = 0;
-bool beepState = false;
 unsigned long lastTempRead = 0;
 const unsigned long TEMP_INTERVAL = 1000;
 
@@ -86,26 +85,27 @@ Adafruit_VL53L0X lox;
 Servo servoX;
 Servo servoY;
 float refDist = 0;
-float measuredH = 0;
+float dimW = 0, dimL = 0, dimH = 0;
 bool sensorLock = false;
 
 const int THRESHOLD_HOLE = 500;
 const int THRESHOLD_DATA = 200;
 const int THRESHOLD_REMOVE_COLOR = 55;
-const int THRESHOLD_CARD_OUT_CLOCK = 900;
+const int THRESHOLD_CARD_OUT = 900;
 const int PATTERN_SIZE = 10;
 int CardA[10] = { 0, 1, 0, 1, 0, 1, 0, 1, 1, 1 };
 int CardB[10] = { 0, 1, 0, 1, 1, 0, 0, 1, 1, 1 };
 int CardC[10] = { 0, 1, 0, 0, 1, 1, 0, 1, 1, 1 };
 int pattern[PATTERN_SIZE];
+int patternRev[PATTERN_SIZE];
 int indexCounter = 0;
 long colorSum = 0;
 int colorCount = 0;
 bool cardInserted = false;
 bool lastClockState = HIGH;
 unsigned long removalTimer = 0;
-char cardType = 0;
-const char* cardColorStr = "";
+char programNum = 0;
+bool programValid = false;
 
 float measuredWeight = 0;
 unsigned long weightStableStart = 0;
@@ -116,36 +116,48 @@ const float MIN_WEIGHT = 20.0;
 
 unsigned long stateStartTime = 0;
 unsigned long lastObjectCheck = 0;
+unsigned long lastBuzzerToggle = 0;
+bool buzzerState = false;
+unsigned long invalidShowStart = 0;
+int beepCount = 0;
+unsigned long lastBeepTime = 0;
+bool inLongBeep = false;
+unsigned long longBeepStart = 0;
+int dimCycleIdx = 0;
+unsigned long lastDimCycle = 0;
 
 enum SystemState {
-  STATE_INIT,
   STATE_FAN_CALIB,
   STATE_WEIGHT_ZERO_CALIB,
   STATE_WAIT_CARD,
-  STATE_REF_DIST,
+  STATE_CARD_VALID_DISPLAY,
+  STATE_CARD_INVALID_DISPLAY,
   STATE_WAIT_OBJECT,
-  STATE_SCAN_HEIGHT,
-  STATE_WAIT_WEIGHT,
+  STATE_REF_DIST,
+  STATE_SCAN_DIM1,
+  STATE_ROTATE_TO_DIM2,
+  STATE_SCAN_DIM2,
+  STATE_ROTATE_TO_DIM3,
+  STATE_SCAN_DIM3,
+  STATE_SCAN_DONE,
+  STATE_TRANSFER_TO_SCALE,
+  STATE_WAIT_ON_SCALE,
+  STATE_WEIGHING,
+  STATE_WEIGH_DONE,
   STATE_HEATING,
-  STATE_CONVEYOR,
+  STATE_BOIL_COMPLETE,
   STATE_DONE
 };
-SystemState state = STATE_INIT;
+SystemState state = STATE_FAN_CALIB;
 
 uint8_t seg[] = {
   0x3f, 0x06, 0x5b, 0x4f,
   0x66, 0x6d, 0x7d, 0x07,
   0x7f, 0x6f
 };
-
-uint8_t TEXT_CAL[4]  = { 0x39, 0x77, 0x38, 0x00 };
-uint8_t TEXT_GO[4]   = { 0x3d, 0x3f, 0x00, 0x00 };
-uint8_t TEXT_DASH[4] = { 0x40, 0x40, 0x40, 0x40 };
-uint8_t TEXT_DONE[4] = { 0x5e, 0x3f, 0x54, 0x79 };
-uint8_t TEXT_HEAT[4] = { 0x76, 0x79, 0x77, 0x78 };
-uint8_t TEXT_CARD[4] = { 0x39, 0x77, 0x50, 0x5e };
-uint8_t TEXT_SCAN[4] = { 0x6d, 0x39, 0x77, 0x54 };
-uint8_t TEXT_RUN[4]  = { 0x50, 0x1c, 0x54, 0x00 };
+uint8_t SEG_DASH = 0x40;
+uint8_t SEG_E    = 0x79;
+uint8_t SEG_BLANK = 0x00;
 
 void startTM(int clk, int dio) {
   pinMode(dio, OUTPUT);
@@ -181,42 +193,35 @@ void writeByte(int clk, int dio, uint8_t b) {
   pinMode(dio, OUTPUT);
 }
 
-void showFloat1d(int clk, int dio, float val) {
-  int v = (int)(val * 10);
-  if (v > 9999) v = 9999;
-  if (v < 0) v = 0;
-  startTM(clk, dio);
-  writeByte(clk, dio, 0x40);
+void writeRaw(int clk, int dio, uint8_t d1, uint8_t d2, uint8_t d3, uint8_t d4) {
+  startTM(clk, dio); writeByte(clk, dio, 0x40); stopTM(clk, dio);
+  startTM(clk, dio); writeByte(clk, dio, 0xC0);
+  writeByte(clk, dio, d1);
+  writeByte(clk, dio, d2);
+  writeByte(clk, dio, d3);
+  writeByte(clk, dio, d4);
   stopTM(clk, dio);
-  startTM(clk, dio);
-  writeByte(clk, dio, 0xC0);
-  writeByte(clk, dio, (v / 1000) % 10 > 0 ? seg[(v / 1000) % 10] : 0x00);
-  writeByte(clk, dio, seg[(v / 100) % 10]);
-  writeByte(clk, dio, seg[(v / 10) % 10] | 0x80);
-  writeByte(clk, dio, seg[v % 10]);
-  stopTM(clk, dio);
-  startTM(clk, dio);
-  writeByte(clk, dio, 0x88 | 7);
-  stopTM(clk, dio);
+  startTM(clk, dio); writeByte(clk, dio, 0x88 | 7); stopTM(clk, dio);
 }
 
-void showFloat2d(int clk, int dio, float val) {
-  int v = (int)(val * 100);
-  if (v > 9999) v = 9999;
-  if (v < 0) v = 0;
-  startTM(clk, dio);
-  writeByte(clk, dio, 0x40);
-  stopTM(clk, dio);
-  startTM(clk, dio);
-  writeByte(clk, dio, 0xC0);
-  writeByte(clk, dio, seg[(v / 1000) % 10]);
-  writeByte(clk, dio, seg[(v / 100) % 10] | 0x80);
-  writeByte(clk, dio, seg[(v / 10) % 10]);
-  writeByte(clk, dio, seg[v % 10]);
-  stopTM(clk, dio);
-  startTM(clk, dio);
-  writeByte(clk, dio, 0x88 | 7);
-  stopTM(clk, dio);
+void clearDisplay(int clk, int dio) {
+  writeRaw(clk, dio, SEG_BLANK, SEG_BLANK, SEG_BLANK, SEG_BLANK);
+}
+
+void showDigit(int clk, int dio, int d) {
+  if (d < 0 || d > 9) {
+    clearDisplay(clk, dio);
+    return;
+  }
+  writeRaw(clk, dio, SEG_BLANK, SEG_BLANK, SEG_BLANK, seg[d]);
+}
+
+void showDash(int clk, int dio) {
+  writeRaw(clk, dio, SEG_BLANK, SEG_BLANK, SEG_BLANK, SEG_DASH);
+}
+
+void showE(int clk, int dio) {
+  writeRaw(clk, dio, SEG_BLANK, SEG_BLANK, SEG_BLANK, SEG_E);
 }
 
 void showInt(int clk, int dio, int val) {
@@ -226,45 +231,103 @@ void showInt(int clk, int dio, int val) {
   int d2 = (val / 100) % 10;
   int d3 = (val / 10) % 10;
   int d4 = val % 10;
-  startTM(clk, dio);
-  writeByte(clk, dio, 0x40);
-  stopTM(clk, dio);
-  startTM(clk, dio);
-  writeByte(clk, dio, 0xC0);
-  writeByte(clk, dio, d1 > 0 ? seg[d1] : 0x00);
-  writeByte(clk, dio, (d1 > 0 || d2 > 0) ? seg[d2] : 0x00);
-  writeByte(clk, dio, (d1 > 0 || d2 > 0 || d3 > 0) ? seg[d3] : 0x00);
-  writeByte(clk, dio, seg[d4]);
-  stopTM(clk, dio);
-  startTM(clk, dio);
-  writeByte(clk, dio, 0x88 | 7);
-  stopTM(clk, dio);
+  uint8_t b1 = d1 > 0 ? seg[d1] : SEG_BLANK;
+  uint8_t b2 = (d1 > 0 || d2 > 0) ? seg[d2] : SEG_BLANK;
+  uint8_t b3 = (d1 > 0 || d2 > 0 || d3 > 0) ? seg[d3] : SEG_BLANK;
+  uint8_t b4 = seg[d4];
+  writeRaw(clk, dio, b1, b2, b3, b4);
 }
 
-void showText(int clk, int dio, uint8_t data[]) {
-  startTM(clk, dio);
-  writeByte(clk, dio, 0x40);
-  stopTM(clk, dio);
-  startTM(clk, dio);
-  writeByte(clk, dio, 0xC0);
-  for (int i = 0; i < 4; i++) writeByte(clk, dio, data[i]);
-  stopTM(clk, dio);
-  startTM(clk, dio);
-  writeByte(clk, dio, 0x88 | 7);
-  stopTM(clk, dio);
+void showCM_1mm(int clk, int dio, float cm) {
+  int v = (int)(cm * 100 + 0.5);
+  if (v > 9999) v = 9999;
+  if (v < 0) v = 0;
+  int d1 = (v / 1000) % 10;
+  int d2 = (v / 100) % 10;
+  int d3 = (v / 10) % 10;
+  int d4 = v % 10;
+  uint8_t b1 = d1 > 0 ? seg[d1] : SEG_BLANK;
+  uint8_t b2 = seg[d2] | 0x80;
+  uint8_t b3 = seg[d3];
+  uint8_t b4 = seg[d4];
+  writeRaw(clk, dio, b1, b2, b3, b4);
 }
 
-void clearDisplay(int clk, int dio) {
-  startTM(clk, dio);
-  writeByte(clk, dio, 0x40);
-  stopTM(clk, dio);
-  startTM(clk, dio);
-  writeByte(clk, dio, 0xC0);
-  for (int i = 0; i < 4; i++) writeByte(clk, dio, 0x00);
-  stopTM(clk, dio);
-  startTM(clk, dio);
-  writeByte(clk, dio, 0x88 | 7);
-  stopTM(clk, dio);
+void showTemp(int clk, int dio, float t) {
+  int v = (int)(t + 0.5);
+  if (v > 999) v = 999;
+  if (v < 0) v = 0;
+  int d1 = (v / 100) % 10;
+  int d2 = (v / 10) % 10;
+  int d3 = v % 10;
+  uint8_t b1 = SEG_BLANK;
+  uint8_t b2 = d1 > 0 ? seg[d1] : SEG_BLANK;
+  uint8_t b3 = (d1 > 0 || d2 > 0) ? seg[d2] : SEG_BLANK;
+  uint8_t b4 = seg[d3];
+  writeRaw(clk, dio, b1, b2, b3, b4);
+}
+
+struct LedBlinker {
+  uint8_t pin;
+  bool enabled;
+  bool solid;
+  unsigned long periodMs;
+  unsigned long lastToggle;
+  bool state;
+};
+
+LedBlinker ledCard  = { PIN_LED_CARD,  false, false, 500, 0, false };
+LedBlinker ledScan  = { PIN_LED_SCAN,  false, false, 500, 0, false };
+LedBlinker ledWeigh = { PIN_LED_WEIGH, false, false, 500, 0, false };
+
+void ledOff(LedBlinker &b) {
+  b.enabled = false;
+  b.solid = false;
+  digitalWrite(b.pin, LOW);
+  b.state = false;
+}
+
+void ledSolid(LedBlinker &b) {
+  b.enabled = true;
+  b.solid = true;
+  digitalWrite(b.pin, HIGH);
+  b.state = true;
+}
+
+void ledBlink(LedBlinker &b, float hz) {
+  b.enabled = true;
+  b.solid = false;
+  b.periodMs = (unsigned long)(500.0 / hz);
+  if (b.periodMs < 50) b.periodMs = 50;
+}
+
+void updateLed(LedBlinker &b, unsigned long now) {
+  if (!b.enabled) return;
+  if (b.solid) return;
+  if (now - b.lastToggle >= b.periodMs) {
+    b.lastToggle = now;
+    b.state = !b.state;
+    digitalWrite(b.pin, b.state ? HIGH : LOW);
+  }
+}
+
+void updateAllLeds(unsigned long now) {
+  updateLed(ledCard, now);
+  updateLed(ledScan, now);
+  updateLed(ledWeigh, now);
+}
+
+void buzzerBlink(unsigned long now, unsigned long periodMs) {
+  if (now - lastBuzzerToggle >= periodMs) {
+    lastBuzzerToggle = now;
+    buzzerState = !buzzerState;
+    digitalWrite(PIN_BUZZER, buzzerState ? HIGH : LOW);
+  }
+}
+
+void buzzerOff() {
+  digitalWrite(PIN_BUZZER, LOW);
+  buzzerState = false;
 }
 
 float measureFreq() {
@@ -310,6 +373,10 @@ float freqToWeight(float freq) {
   return w;
 }
 
+bool isObjectOnScale(float freq) {
+  return fabs(freq - zeroFreq) > SCALE_PRESENCE_DELTA;
+}
+
 float readTemp() {
   byte d[2];
   ds.reset();
@@ -329,7 +396,7 @@ void setupPWM10bit() {
   pinMode(PIN_PWM_FAN, OUTPUT);
   TCCR1A = _BV(COM1A1) | _BV(WGM11) | _BV(WGM10);
   TCCR1B = _BV(WGM12) | _BV(CS10);
-  OCR1A = 400;
+  OCR1A = 200;
 }
 
 void writePWM10bit(int value) {
@@ -385,6 +452,18 @@ void updateFanSensor() {
   if (val < sensorMin) sensorMin = val;
 }
 
+float weightToTargetRPS(float w) {
+  if (w < 200) return 1.0;
+  if (w > 800) return 20.0;
+  return 1.0 + (w - 200.0) * (19.0 / 600.0);
+}
+
+float weightToTargetTemp(float w) {
+  if (w < 200) return 35.0;
+  if (w > 800) return 50.0;
+  return 35.0 + (w - 200.0) * (15.0 / 600.0);
+}
+
 float readCM() {
   if (sensorLock) return -1;
   VL53L0X_RangingMeasurementData_t m;
@@ -415,23 +494,23 @@ float getReference() {
   return (count > 0) ? sum / count : -1;
 }
 
-bool objectDetected() {
+bool objectAtScanner() {
   static int hit = 0;
   float d = readStable();
-  if (d > 0 && fabs(d - refDist) > 1) hit++;
+  if (d > 0 && fabs(d - refDist) > 1.0) hit++;
   else hit = 0;
-  return (hit >= 1);
+  return (hit >= 2);
 }
 
-float scanHeight() {
-  float maxHeight = 0;
+float scanDimension() {
+  float maxDim = 0;
   for (int angle = 60; angle <= 120; angle++) {
     servoX.write(angle);
     delay(40);
     float d = readStable();
     if (d > 0) {
       float h = refDist - d;
-      if (h > maxHeight) maxHeight = h;
+      if (h > maxDim) maxDim = h;
     }
   }
   for (int angle = 120; angle >= 60; angle--) {
@@ -440,16 +519,32 @@ float scanHeight() {
     float d = readStable();
     if (d > 0) {
       float h = refDist - d;
-      if (h > maxHeight) maxHeight = h;
+      if (h > maxDim) maxDim = h;
     }
   }
   servoX.write(90);
-  return maxHeight;
+  return maxDim;
 }
 
-void conveyorBackward(int speed, int durationMs) {
-  digitalWrite(PIN_MOTOR_IN1, LOW);
-  digitalWrite(PIN_MOTOR_IN2, HIGH);
+void rotateServoY(int targetDeg) {
+  static int currentDeg = 0;
+  int step = (targetDeg > currentDeg) ? 1 : -1;
+  while (currentDeg != targetDeg) {
+    currentDeg += step;
+    servoY.writeMicroseconds(map(currentDeg, 0, 180, 1000, 2000));
+    delay(15);
+  }
+  delay(500);
+}
+
+void conveyorRunMs(int speed, int durationMs, bool forward) {
+  if (forward) {
+    digitalWrite(PIN_MOTOR_IN1, HIGH);
+    digitalWrite(PIN_MOTOR_IN2, LOW);
+  } else {
+    digitalWrite(PIN_MOTOR_IN1, LOW);
+    digitalWrite(PIN_MOTOR_IN2, HIGH);
+  }
   analogWrite(PIN_MOTOR_ENA, speed);
   unsigned long s = millis();
   while (millis() - s < (unsigned long)durationMs) {
@@ -458,29 +553,6 @@ void conveyorBackward(int speed, int durationMs) {
     delay(2);
   }
   analogWrite(PIN_MOTOR_ENA, 0);
-}
-
-void conveyorForward(int speed, int durationMs) {
-  digitalWrite(PIN_MOTOR_IN1, HIGH);
-  digitalWrite(PIN_MOTOR_IN2, LOW);
-  analogWrite(PIN_MOTOR_ENA, speed);
-  unsigned long s = millis();
-  while (millis() - s < (unsigned long)durationMs) {
-    updateFanSensor();
-    updateFanPID(millis());
-    delay(2);
-  }
-  analogWrite(PIN_MOTOR_ENA, 0);
-}
-
-void runConveyor() {
-  for (int i = 0; i < 15; i++) {
-    conveyorBackward(100, 250);
-    delay(300);
-    conveyorForward(100, 250);
-    delay(300);
-  }
-  conveyorBackward(70, 2000);
 }
 
 bool comparePattern(int a[], int b[]) {
@@ -490,10 +562,13 @@ bool comparePattern(int a[], int b[]) {
   return true;
 }
 
-const char* identifyColor(int val) {
-  if (val > 40) return "White";
-  if (val < 30) return "Black";
-  return "Yellow";
+bool isReversedPattern(int a[]) {
+  int rev[PATTERN_SIZE];
+  for (int i = 0; i < PATTERN_SIZE; i++) rev[i] = a[PATTERN_SIZE - 1 - i];
+  if (comparePattern(rev, CardA)) return true;
+  if (comparePattern(rev, CardB)) return true;
+  if (comparePattern(rev, CardC)) return true;
+  return false;
 }
 
 void resetCardState() {
@@ -502,10 +577,9 @@ void resetCardState() {
   colorCount = 0;
   cardInserted = false;
   removalTimer = 0;
-  digitalWrite(PIN_LED_CARD, LOW);
 }
 
-bool readCard() {
+int readCardOnce() {
   int clockRaw = analogRead(PIN_LDR_CLOCK);
   bool currentClock = (clockRaw > THRESHOLD_HOLE) ? HIGH : LOW;
 
@@ -515,19 +589,18 @@ bool readCard() {
       indexCounter = 0;
       colorSum = 0;
       colorCount = 0;
-      digitalWrite(PIN_LED_CARD, HIGH);
     }
     lastClockState = currentClock;
-    return false;
+    return 0;
   }
 
   if (cardInserted && indexCounter < PATTERN_SIZE) {
     if (analogRead(PIN_LDR_COLOR) > THRESHOLD_REMOVE_COLOR) {
       if (removalTimer == 0) removalTimer = millis();
       if (millis() - removalTimer > 500) {
-        Serial.println("CARD_REMOVED");
+        Serial.println("CARD_REMOVED_EARLY");
         resetCardState();
-        return false;
+        return 0;
       }
     } else {
       removalTimer = 0;
@@ -544,35 +617,23 @@ bool readCard() {
   lastClockState = currentClock;
 
   if (indexCounter >= PATTERN_SIZE) {
-    bool matched = false;
-    if (comparePattern(pattern, CardA))      { cardType = 'A'; matched = true; }
-    else if (comparePattern(pattern, CardB)) { cardType = 'B'; matched = true; }
-    else if (comparePattern(pattern, CardC)) { cardType = 'C'; matched = true; }
-    else                                     { cardType = 0; }
+    int result = 0;
+    if      (comparePattern(pattern, CardA)) { programNum = '1'; result = 1; }
+    else if (comparePattern(pattern, CardB)) { programNum = '2'; result = 1; }
+    else if (comparePattern(pattern, CardC)) { programNum = '3'; result = 1; }
+    else if (isReversedPattern(pattern))     { programNum = 'E'; result = 2; }
+    else                                     { programNum = 'E'; result = 2; }
 
-    int avgColor = (colorCount > 0) ? (int)(colorSum / colorCount) : 0;
-    cardColorStr = identifyColor(avgColor);
+    Serial.print("CARD_READ=");
+    Serial.println(programNum);
 
-    Serial.print("CARD=");
-    Serial.print(matched ? cardType : 'E');
-    Serial.print(" COLOR=");
-    Serial.print(cardColorStr);
-    Serial.print(" AVG=");
-    Serial.println(avgColor);
-
-    while (analogRead(PIN_LDR_CLOCK) < THRESHOLD_CARD_OUT_CLOCK) {
+    while (analogRead(PIN_LDR_CLOCK) < THRESHOLD_CARD_OUT) {
       delay(10);
     }
     resetCardState();
-    return matched;
+    return result;
   }
-  return false;
-}
-
-void setLEDsForCard(char c) {
-  digitalWrite(PIN_LED1, c == 'A' ? HIGH : LOW);
-  digitalWrite(PIN_LED2, c == 'B' ? HIGH : LOW);
-  digitalWrite(PIN_LED3, c == 'C' ? HIGH : LOW);
+  return 0;
 }
 
 void setup() {
@@ -584,11 +645,12 @@ void setup() {
 
   pinMode(PIN_RELAY, OUTPUT);
   pinMode(PIN_BUZZER, OUTPUT);
-  pinMode(PIN_LED1, OUTPUT);
-  pinMode(PIN_LED2, OUTPUT);
-  pinMode(PIN_LED3, OUTPUT);
   pinMode(PIN_LED_CARD, OUTPUT);
+  pinMode(PIN_LED_SCAN, OUTPUT);
+  pinMode(PIN_LED_WEIGH, OUTPUT);
+  pinMode(PIN_LED_KETTLE, OUTPUT);
   digitalWrite(PIN_RELAY, RELAY_OFF);
+  digitalWrite(PIN_LED_KETTLE, LOW);
 
   pinMode(PIN_MOTOR_ENA, OUTPUT);
   pinMode(PIN_MOTOR_IN1, OUTPUT);
@@ -600,32 +662,30 @@ void setup() {
   servoX.attach(PIN_SERVO_X);
   servoY.attach(PIN_SERVO_Y);
   servoX.write(90);
-  servoY.writeMicroseconds(1500);
+  servoY.writeMicroseconds(1000);
 
   setupPWM10bit();
   fanCalibStart = millis();
 
-  showText(CLK1, DIO1, TEXT_CAL);
-  showText(CLK2, DIO2, TEXT_DASH);
-  showText(CLK3, DIO3, TEXT_DASH);
+  showDash(CLK1, DIO1);
+  clearDisplay(CLK2, DIO2);
+  clearDisplay(CLK3, DIO3);
 
   state = STATE_FAN_CALIB;
   stateStartTime = millis();
 }
 
 void loop() {
-  unsigned long nowMillis = millis();
+  unsigned long now = millis();
   updateFanSensor();
+  updateAllLeds(now);
 
   switch (state) {
 
     case STATE_FAN_CALIB: {
       if (fanCalibrated) {
         state = STATE_WEIGHT_ZERO_CALIB;
-        stateStartTime = nowMillis;
-        showText(CLK1, DIO1, TEXT_CAL);
-        clearDisplay(CLK2, DIO2);
-        clearDisplay(CLK3, DIO3);
+        stateStartTime = now;
       }
       break;
     }
@@ -634,188 +694,373 @@ void loop() {
       static float sumF = 0;
       static int cntF = 0;
       float f = measureFreq();
-      showFloat1d(CLK2, DIO2, f);
-      if (nowMillis - stateStartTime > 1000) {
+      if (now - stateStartTime > 1000) {
         sumF += f;
         cntF++;
       }
-      if (nowMillis - stateStartTime >= 4000) {
+      if (now - stateStartTime >= 4000) {
         zeroFreq = (cntF > 0) ? sumF / cntF : MODEL_C;
         zeroOffset = zeroFreq - MODEL_C;
         sumF = 0;
         cntF = 0;
-        state = STATE_WAIT_CARD;
-        stateStartTime = nowMillis;
-        showText(CLK1, DIO1, TEXT_CARD);
-        clearDisplay(CLK2, DIO2);
-        clearDisplay(CLK3, DIO3);
         Serial.print("ZERO_FREQ=");
         Serial.print(zeroFreq, 3);
         Serial.print(" OFFSET=");
         Serial.println(zeroOffset, 3);
+        state = STATE_WAIT_CARD;
+        stateStartTime = now;
+        ledBlink(ledCard, 2.0);
+        showDash(CLK1, DIO1);
+        clearDisplay(CLK2, DIO2);
+        clearDisplay(CLK3, DIO3);
       }
       break;
     }
 
     case STATE_WAIT_CARD: {
-      if (readCard()) {
-        setLEDsForCard(cardType);
-        state = STATE_REF_DIST;
-        stateStartTime = nowMillis;
-        showText(CLK1, DIO1, TEXT_SCAN);
+      int r = readCardOnce();
+      if (cardInserted) {
+        ledSolid(ledCard);
+      } else if (!cardInserted && !ledCard.solid) {
+        ledBlink(ledCard, 2.0);
+      }
+      if (r == 1) {
+        programValid = true;
+        digitalWrite(PIN_BUZZER, HIGH);
+        delay(150);
+        digitalWrite(PIN_BUZZER, LOW);
+        if (programNum == '1')      writeRaw(CLK1, DIO1, SEG_BLANK, SEG_BLANK, SEG_BLANK, seg[1]);
+        else if (programNum == '2') writeRaw(CLK1, DIO1, SEG_BLANK, SEG_BLANK, SEG_BLANK, seg[2]);
+        else if (programNum == '3') writeRaw(CLK1, DIO1, SEG_BLANK, SEG_BLANK, SEG_BLANK, seg[3]);
+        ledBlink(ledCard, 2.0);
+        state = STATE_CARD_VALID_DISPLAY;
+        stateStartTime = now;
+      } else if (r == 2) {
+        programValid = false;
+        showE(CLK1, DIO1);
+        digitalWrite(PIN_BUZZER, HIGH);
+        delay(500);
+        digitalWrite(PIN_BUZZER, LOW);
+        state = STATE_CARD_INVALID_DISPLAY;
+        stateStartTime = now;
       }
       break;
     }
 
-    case STATE_REF_DIST: {
-      servoX.write(90);
-      servoY.writeMicroseconds(1500);
-      refDist = getReference();
-      Serial.print("REF=");
-      Serial.println(refDist);
-      state = STATE_WAIT_OBJECT;
-      stateStartTime = nowMillis;
-      lastObjectCheck = nowMillis;
+    case STATE_CARD_VALID_DISPLAY: {
+      if (now - stateStartTime >= 2000) {
+        ledOff(ledCard);
+        ledBlink(ledScan, 0.25);
+        showDash(CLK1, DIO1);
+        clearDisplay(CLK2, DIO2);
+        clearDisplay(CLK3, DIO3);
+        state = STATE_WAIT_OBJECT;
+        stateStartTime = now;
+      }
+      break;
+    }
+
+    case STATE_CARD_INVALID_DISPLAY: {
+      if (now - stateStartTime >= 2000) {
+        showDash(CLK1, DIO1);
+        ledBlink(ledCard, 2.0);
+        state = STATE_WAIT_CARD;
+        stateStartTime = now;
+      }
       break;
     }
 
     case STATE_WAIT_OBJECT: {
-      if (nowMillis - lastObjectCheck > 200) {
-        lastObjectCheck = nowMillis;
-        if (objectDetected()) {
-          state = STATE_SCAN_HEIGHT;
-          stateStartTime = nowMillis;
+      if (now - lastObjectCheck > 200) {
+        lastObjectCheck = now;
+        servoY.writeMicroseconds(1000);
+        if (refDist <= 0) refDist = getReference();
+        if (objectAtScanner()) {
+          Serial.println("OBJECT_DETECTED");
+          ledBlink(ledScan, 0.5);
+          state = STATE_REF_DIST;
+          stateStartTime = now;
         }
       }
       break;
     }
 
-    case STATE_SCAN_HEIGHT: {
-      measuredH = scanHeight();
-      Serial.print("H=");
-      Serial.println(measuredH);
-      showFloat2d(CLK2, DIO2, measuredH);
-      state = STATE_WAIT_WEIGHT;
-      stateStartTime = nowMillis;
-      weightStableStart = 0;
-      lastWeight = 0;
+    case STATE_REF_DIST: {
+      refDist = getReference();
+      Serial.print("REF=");
+      Serial.println(refDist);
+      state = STATE_SCAN_DIM1;
+      stateStartTime = now;
       break;
     }
 
-    case STATE_WAIT_WEIGHT: {
+    case STATE_SCAN_DIM1: {
+      buzzerBlink(now, 200);
+      dimW = scanDimension();
+      Serial.print("DIM1=");
+      Serial.println(dimW);
+      state = STATE_ROTATE_TO_DIM2;
+      stateStartTime = now;
+      break;
+    }
+
+    case STATE_ROTATE_TO_DIM2: {
+      buzzerBlink(now, 200);
+      rotateServoY(90);
+      refDist = getReference();
+      state = STATE_SCAN_DIM2;
+      stateStartTime = now;
+      break;
+    }
+
+    case STATE_SCAN_DIM2: {
+      buzzerBlink(now, 200);
+      dimL = scanDimension();
+      Serial.print("DIM2=");
+      Serial.println(dimL);
+      state = STATE_ROTATE_TO_DIM3;
+      stateStartTime = now;
+      break;
+    }
+
+    case STATE_ROTATE_TO_DIM3: {
+      buzzerBlink(now, 200);
+      rotateServoY(180);
+      refDist = getReference();
+      state = STATE_SCAN_DIM3;
+      stateStartTime = now;
+      break;
+    }
+
+    case STATE_SCAN_DIM3: {
+      buzzerBlink(now, 200);
+      dimH = scanDimension();
+      Serial.print("DIM3=");
+      Serial.println(dimH);
+      buzzerOff();
+      state = STATE_SCAN_DONE;
+      stateStartTime = now;
+      lastDimCycle = now;
+      dimCycleIdx = 0;
+      break;
+    }
+
+    case STATE_SCAN_DONE: {
+      ledSolid(ledScan);
+      digitalWrite(PIN_BUZZER, HIGH);
+      delay(200);
+      digitalWrite(PIN_BUZZER, LOW);
+      delay(100);
+      digitalWrite(PIN_BUZZER, HIGH);
+      delay(200);
+      digitalWrite(PIN_BUZZER, LOW);
+
+      showCM_1mm(CLK1, DIO1, dimW);
+      showCM_1mm(CLK2, DIO2, dimL);
+      showCM_1mm(CLK3, DIO3, dimH);
+      Serial.print("DIMS W=");
+      Serial.print(dimW);
+      Serial.print(" L=");
+      Serial.print(dimL);
+      Serial.print(" H=");
+      Serial.println(dimH);
+
+      delay(2000);
+      state = STATE_TRANSFER_TO_SCALE;
+      stateStartTime = now;
+      break;
+    }
+
+    case STATE_TRANSFER_TO_SCALE: {
+      ledOff(ledScan);
+      ledBlink(ledScan, 0.25);
+      ledBlink(ledWeigh, 0.25);
+      conveyorRunMs(120, 4000, true);
+      state = STATE_WAIT_ON_SCALE;
+      stateStartTime = now;
+      break;
+    }
+
+    case STATE_WAIT_ON_SCALE: {
+      float f = measureFreq();
+      if (isObjectOnScale(f)) {
+        ledBlink(ledWeigh, 1.0);
+        state = STATE_WEIGHING;
+        stateStartTime = now;
+        weightStableStart = 0;
+        lastWeight = 0;
+        Serial.println("BOX_ON_SCALE");
+      } else {
+        if (now - stateStartTime > 30000) {
+          Serial.println("SCALE_TIMEOUT");
+          state = STATE_DONE;
+        }
+      }
+      break;
+    }
+
+    case STATE_WEIGHING: {
       float freq = measureFreq();
       float weight = freqToWeight(freq);
       if (weight < 0) weight = 0;
       if (weight > 800) weight = 800;
       int wr = ((int)(weight + 5)) / 10 * 10;
 
-      showFloat1d(CLK1, DIO1, freq);
-      showInt(CLK2, DIO2, wr);
+      showInt(CLK1, DIO1, wr);
 
       if (fabs(weight - lastWeight) < WEIGHT_THRESHOLD) {
-        if (weightStableStart == 0) weightStableStart = nowMillis;
-        if (nowMillis - weightStableStart >= WEIGHT_STABLE_TIME && weight > MIN_WEIGHT) {
+        if (weightStableStart == 0) weightStableStart = now;
+        if (now - weightStableStart >= WEIGHT_STABLE_TIME && weight > MIN_WEIGHT) {
           measuredWeight = weight;
-          targetTemp = 0.025 * measuredWeight + 30.0;
-          state = STATE_HEATING;
-          stateStartTime = nowMillis;
-          lastTempRead = 0;
-          showText(CLK1, DIO1, TEXT_HEAT);
+          targetTemp = weightToTargetTemp(measuredWeight);
+          targetRPS = weightToTargetRPS(measuredWeight);
           Serial.print("W=");
           Serial.print(measuredWeight);
-          Serial.print(" TARGET=");
-          Serial.println(targetTemp, 2);
+          Serial.print(" TGT_TEMP=");
+          Serial.print(targetTemp);
+          Serial.print(" TGT_RPS=");
+          Serial.println(targetRPS);
+          state = STATE_WEIGH_DONE;
+          stateStartTime = now;
         }
       } else {
         weightStableStart = 0;
       }
       lastWeight = weight;
+      break;
+    }
 
-      updateFanPID(nowMillis);
+    case STATE_WEIGH_DONE: {
+      ledBlink(ledWeigh, 0.25);
+      int wr = ((int)(measuredWeight + 5)) / 10 * 10;
+      showInt(CLK1, DIO1, wr);
+      if (beepCount < 3) {
+        if (now - lastBeepTime >= 250) {
+          lastBeepTime = now;
+          if (digitalRead(PIN_BUZZER) == LOW) {
+            digitalWrite(PIN_BUZZER, HIGH);
+          } else {
+            digitalWrite(PIN_BUZZER, LOW);
+            beepCount++;
+          }
+        }
+      } else {
+        digitalWrite(PIN_BUZZER, LOW);
+        if (now - stateStartTime >= 2500) {
+          beepCount = 0;
+          showInt(CLK1, DIO1, wr);
+          showTemp(CLK2, DIO2, targetTemp);
+          state = STATE_HEATING;
+          stateStartTime = now;
+          lastTempRead = 0;
+          digitalWrite(PIN_LED_KETTLE, HIGH);
+          digitalWrite(PIN_RELAY, RELAY_ON);
+        }
+      }
       break;
     }
 
     case STATE_HEATING: {
-      updateFanPID(nowMillis);
+      updateFanPID(now);
+      buzzerBlink(now, 300);
 
-      if (nowMillis - lastTempRead >= TEMP_INTERVAL) {
-        lastTempRead = nowMillis;
+      if (now - lastTempRead >= TEMP_INTERVAL) {
+        lastTempRead = now;
         currentTemp = readTemp();
 
         if (currentTemp < targetTemp - marginOn) {
           digitalWrite(PIN_RELAY, RELAY_ON);
+          digitalWrite(PIN_LED_KETTLE, HIGH);
         } else if (currentTemp >= targetTemp - marginOff) {
           digitalWrite(PIN_RELAY, RELAY_OFF);
+          digitalWrite(PIN_LED_KETTLE, LOW);
         }
 
-        showFloat2d(CLK1, DIO1, targetTemp);
-        showInt(CLK2, DIO2, (int)measuredWeight);
-        showFloat2d(CLK3, DIO3, currentTemp);
+        int wr = ((int)(measuredWeight + 5)) / 10 * 10;
+        int rpm = (int)(rps * 60.0 + 0.5);
+        showInt(CLK1, DIO1, wr);
+        showTemp(CLK2, DIO2, targetTemp);
+        showInt(CLK3, DIO3, rpm);
 
         Serial.print("T=");
         Serial.print(currentTemp, 2);
         Serial.print(" TGT=");
-        Serial.println(targetTemp, 2);
+        Serial.print(targetTemp, 2);
+        Serial.print(" RPS=");
+        Serial.println(rps, 2);
 
         if (currentTemp >= targetTemp) {
           digitalWrite(PIN_RELAY, RELAY_OFF);
+          digitalWrite(PIN_LED_KETTLE, LOW);
+          buzzerOff();
           digitalWrite(PIN_BUZZER, HIGH);
           delay(3000);
           digitalWrite(PIN_BUZZER, LOW);
-          showText(CLK2, DIO2, TEXT_DONE);
-          state = STATE_CONVEYOR;
-          stateStartTime = nowMillis;
+          state = STATE_BOIL_COMPLETE;
+          stateStartTime = now;
         }
-      }
-
-      if (state == STATE_HEATING && nowMillis - lastBeep > 300) {
-        lastBeep = nowMillis;
-        beepState = !beepState;
-        digitalWrite(PIN_BUZZER, beepState);
       }
       break;
     }
 
-    case STATE_CONVEYOR: {
-      showText(CLK1, DIO1, TEXT_RUN);
-      runConveyor();
-      state = STATE_DONE;
-      stateStartTime = nowMillis;
+    case STATE_BOIL_COMPLETE: {
+      updateFanPID(now);
+      currentTemp = readTemp();
+      int wr = ((int)(measuredWeight + 5)) / 10 * 10;
+      int rpm = (int)(rps * 60.0 + 0.5);
+      showInt(CLK1, DIO1, wr);
+      showTemp(CLK2, DIO2, currentTemp);
+      showInt(CLK3, DIO3, rpm);
+
+      if (now - stateStartTime >= 2000) {
+        digitalWrite(PIN_BUZZER, HIGH);
+        delay(150); digitalWrite(PIN_BUZZER, LOW); delay(100);
+        digitalWrite(PIN_BUZZER, HIGH);
+        delay(150); digitalWrite(PIN_BUZZER, LOW); delay(100);
+        digitalWrite(PIN_BUZZER, HIGH);
+        delay(500); digitalWrite(PIN_BUZZER, LOW);
+        state = STATE_DONE;
+        stateStartTime = now;
+      }
       break;
     }
 
     case STATE_DONE: {
-      Serial.print("FINAL H=");
-      Serial.print(measuredH);
-      Serial.print(" W=");
+      Serial.print("FINAL W=");
       Serial.print(measuredWeight);
-      Serial.print(" CARD=");
-      Serial.print(cardType);
-      Serial.print(" COLOR=");
-      Serial.println(cardColorStr);
+      Serial.print(" T=");
+      Serial.print(currentTemp);
+      Serial.print(" PROG=");
+      Serial.println(programNum);
 
-      showText(CLK1, DIO1, TEXT_DONE);
-      showText(CLK2, DIO2, TEXT_DONE);
-      showText(CLK3, DIO3, TEXT_DONE);
       delay(5000);
 
-      digitalWrite(PIN_LED1, LOW);
-      digitalWrite(PIN_LED2, LOW);
-      digitalWrite(PIN_LED3, LOW);
-      cardType = 0;
-      cardColorStr = "";
-      measuredH = 0;
+      ledOff(ledCard);
+      ledOff(ledScan);
+      ledOff(ledWeigh);
+      digitalWrite(PIN_LED_KETTLE, LOW);
+      buzzerOff();
+      programNum = 0;
+      programValid = false;
+      dimW = dimL = dimH = 0;
       measuredWeight = 0;
+      currentTemp = 0;
+      targetTemp = 0;
+      targetRPS = 1.0;
       indexCounter = 0;
       cardInserted = false;
       weightStableStart = 0;
       lastWeight = 0;
+      beepCount = 0;
+      refDist = 0;
+      servoY.writeMicroseconds(1000);
 
-      state = STATE_WAIT_CARD;
-      stateStartTime = millis();
-      showText(CLK1, DIO1, TEXT_CARD);
+      ledBlink(ledCard, 2.0);
+      showDash(CLK1, DIO1);
       clearDisplay(CLK2, DIO2);
       clearDisplay(CLK3, DIO3);
+      state = STATE_WAIT_CARD;
+      stateStartTime = millis();
       break;
     }
 
