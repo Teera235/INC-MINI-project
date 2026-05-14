@@ -8,9 +8,10 @@
 
 #define PIN_FFT          A0
 #define PIN_FAN_SENSOR   A2
-#define PIN_LDR_CLOCK    A4
-#define PIN_LDR_DATA     A5
-#define PIN_LDR_COLOR    A6
+#define PIN_LDR_CLOCK    A8
+#define PIN_LDR_DATA     A9
+#define PIN_LDR_COLOR    A10
+#define PIN_LED_CARD     A3
 
 #define PIN_PWM_FAN      11
 #define PIN_DS18B20      10
@@ -26,7 +27,6 @@
 
 #define PIN_SERVO_X      44
 #define PIN_SERVO_Y      45
-#define PIN_LED_CARD     13
 
 #define CLK1 22
 #define DIO1 24
@@ -87,22 +87,25 @@ Servo servoX;
 Servo servoY;
 float refDist = 0;
 float measuredH = 0;
-float measuredL = 0;
 bool sensorLock = false;
 
 const int THRESHOLD_HOLE = 500;
+const int THRESHOLD_DATA = 200;
+const int THRESHOLD_REMOVE_COLOR = 55;
+const int THRESHOLD_CARD_OUT_CLOCK = 900;
 const int PATTERN_SIZE = 10;
 int CardA[10] = { 0, 1, 0, 1, 0, 1, 0, 1, 1, 1 };
 int CardB[10] = { 0, 1, 0, 1, 1, 0, 0, 1, 1, 1 };
 int CardC[10] = { 0, 1, 0, 0, 1, 1, 0, 1, 1, 1 };
 int pattern[PATTERN_SIZE];
 int indexCounter = 0;
+long colorSum = 0;
+int colorCount = 0;
 bool cardInserted = false;
-bool stableClock = HIGH;
-bool lastClockRaw = HIGH;
-unsigned long debounceTimer = 0;
-const int DEBOUNCE_DELAY = 30;
+bool lastClockState = HIGH;
+unsigned long removalTimer = 0;
 char cardType = 0;
+const char* cardColorStr = "";
 
 float measuredWeight = 0;
 unsigned long weightStableStart = 0;
@@ -119,12 +122,9 @@ enum SystemState {
   STATE_FAN_CALIB,
   STATE_WEIGHT_ZERO_CALIB,
   STATE_WAIT_CARD,
-  STATE_REF_DIST_1,
+  STATE_REF_DIST,
   STATE_WAIT_OBJECT,
   STATE_SCAN_HEIGHT,
-  STATE_ROTATE_Y,
-  STATE_REF_DIST_2,
-  STATE_SCAN_LENGTH,
   STATE_WAIT_WEIGHT,
   STATE_HEATING,
   STATE_CONVEYOR,
@@ -396,7 +396,7 @@ float readCM() {
 float readStable() {
   float sum = 0;
   int c = 0;
-  for (int i = 0; i < 3; i++) {
+  for (int i = 0; i < 5; i++) {
     float d = readCM();
     if (d > 0) { sum += d; c++; }
     delay(10);
@@ -418,53 +418,69 @@ float getReference() {
 bool objectDetected() {
   static int hit = 0;
   float d = readStable();
-  if (d > 0 && fabs(d - refDist) > 5) hit++;
+  if (d > 0 && fabs(d - refDist) > 1) hit++;
   else hit = 0;
-  return (hit >= 3);
+  return (hit >= 1);
 }
 
-void rotateY_180() {
-  for (int p = 0; p <= 180; p++) {
-    servoY.writeMicroseconds(map(p, 0, 180, 1000, 2000));
-    delay(15);
-  }
-  delay(500);
-}
-
-float scanAxis() {
-  sensorLock = true;
-  float sum = 0;
-  int count = 0;
-  int center = 1500;
-  int range = 120;
-  for (int i = 0; i < 80; i++) {
-    int pos = map(i, 0, 80, center + range, center - range);
-    servoX.writeMicroseconds(pos);
-    delay(15);
-    sensorLock = false;
+float scanHeight() {
+  float maxHeight = 0;
+  for (int angle = 60; angle <= 120; angle++) {
+    servoX.write(angle);
+    delay(40);
     float d = readStable();
-    sensorLock = true;
     if (d > 0) {
-      float v = refDist - d;
-      if (v > 0) { sum += v; count++; }
+      float h = refDist - d;
+      if (h > maxHeight) maxHeight = h;
     }
   }
-  servoX.writeMicroseconds(1500);
-  sensorLock = false;
-  return (count > 0) ? sum / count : -1;
+  for (int angle = 120; angle >= 60; angle--) {
+    servoX.write(angle);
+    delay(40);
+    float d = readStable();
+    if (d > 0) {
+      float h = refDist - d;
+      if (h > maxHeight) maxHeight = h;
+    }
+  }
+  servoX.write(90);
+  return maxHeight;
 }
 
-void runConveyor(unsigned long durationMs, int speed) {
-  digitalWrite(PIN_MOTOR_IN1, HIGH);
-  digitalWrite(PIN_MOTOR_IN2, LOW);
+void conveyorBackward(int speed, int durationMs) {
+  digitalWrite(PIN_MOTOR_IN1, LOW);
+  digitalWrite(PIN_MOTOR_IN2, HIGH);
   analogWrite(PIN_MOTOR_ENA, speed);
-  unsigned long start = millis();
-  while (millis() - start < durationMs) {
+  unsigned long s = millis();
+  while (millis() - s < (unsigned long)durationMs) {
     updateFanSensor();
     updateFanPID(millis());
     delay(2);
   }
   analogWrite(PIN_MOTOR_ENA, 0);
+}
+
+void conveyorForward(int speed, int durationMs) {
+  digitalWrite(PIN_MOTOR_IN1, HIGH);
+  digitalWrite(PIN_MOTOR_IN2, LOW);
+  analogWrite(PIN_MOTOR_ENA, speed);
+  unsigned long s = millis();
+  while (millis() - s < (unsigned long)durationMs) {
+    updateFanSensor();
+    updateFanPID(millis());
+    delay(2);
+  }
+  analogWrite(PIN_MOTOR_ENA, 0);
+}
+
+void runConveyor() {
+  for (int i = 0; i < 15; i++) {
+    conveyorBackward(100, 250);
+    delay(300);
+    conveyorForward(100, 250);
+    delay(300);
+  }
+  conveyorBackward(70, 2000);
 }
 
 bool comparePattern(int a[], int b[]) {
@@ -474,36 +490,81 @@ bool comparePattern(int a[], int b[]) {
   return true;
 }
 
+const char* identifyColor(int val) {
+  if (val > 40) return "White";
+  if (val < 30) return "Black";
+  return "Yellow";
+}
+
+void resetCardState() {
+  indexCounter = 0;
+  colorSum = 0;
+  colorCount = 0;
+  cardInserted = false;
+  removalTimer = 0;
+  digitalWrite(PIN_LED_CARD, LOW);
+}
+
 bool readCard() {
   int clockRaw = analogRead(PIN_LDR_CLOCK);
-  bool rawClock = (clockRaw > THRESHOLD_HOLE);
-  if (rawClock != lastClockRaw) debounceTimer = millis();
-  if (millis() - debounceTimer > DEBOUNCE_DELAY) stableClock = rawClock;
-  bool prevRaw = lastClockRaw;
-  lastClockRaw = rawClock;
-  bool currentClock = stableClock;
+  bool currentClock = (clockRaw > THRESHOLD_HOLE) ? HIGH : LOW;
 
   if (!cardInserted) {
     if (currentClock == LOW) {
       cardInserted = true;
       indexCounter = 0;
+      colorSum = 0;
+      colorCount = 0;
       digitalWrite(PIN_LED_CARD, HIGH);
     }
+    lastClockState = currentClock;
     return false;
   }
 
-  if (currentClock == HIGH && prevRaw == LOW && indexCounter < PATTERN_SIZE) {
-    pattern[indexCounter] = (analogRead(PIN_LDR_DATA) > 500);
-    indexCounter++;
+  if (cardInserted && indexCounter < PATTERN_SIZE) {
+    if (analogRead(PIN_LDR_COLOR) > THRESHOLD_REMOVE_COLOR) {
+      if (removalTimer == 0) removalTimer = millis();
+      if (millis() - removalTimer > 500) {
+        Serial.println("CARD_REMOVED");
+        resetCardState();
+        return false;
+      }
+    } else {
+      removalTimer = 0;
+    }
   }
 
+  if (currentClock == HIGH && lastClockState == LOW) {
+    pattern[indexCounter] = (analogRead(PIN_LDR_DATA) > THRESHOLD_DATA) ? 1 : 0;
+    int colorValue = analogRead(PIN_LDR_COLOR);
+    colorSum += colorValue;
+    colorCount++;
+    indexCounter++;
+  }
+  lastClockState = currentClock;
+
   if (indexCounter >= PATTERN_SIZE) {
-    cardInserted = false;
-    digitalWrite(PIN_LED_CARD, LOW);
-    if (comparePattern(pattern, CardA)) { cardType = 'A'; return true; }
-    if (comparePattern(pattern, CardB)) { cardType = 'B'; return true; }
-    if (comparePattern(pattern, CardC)) { cardType = 'C'; return true; }
-    indexCounter = 0;
+    bool matched = false;
+    if (comparePattern(pattern, CardA))      { cardType = 'A'; matched = true; }
+    else if (comparePattern(pattern, CardB)) { cardType = 'B'; matched = true; }
+    else if (comparePattern(pattern, CardC)) { cardType = 'C'; matched = true; }
+    else                                     { cardType = 0; }
+
+    int avgColor = (colorCount > 0) ? (int)(colorSum / colorCount) : 0;
+    cardColorStr = identifyColor(avgColor);
+
+    Serial.print("CARD=");
+    Serial.print(matched ? cardType : 'E');
+    Serial.print(" COLOR=");
+    Serial.print(cardColorStr);
+    Serial.print(" AVG=");
+    Serial.println(avgColor);
+
+    while (analogRead(PIN_LDR_CLOCK) < THRESHOLD_CARD_OUT_CLOCK) {
+      delay(10);
+    }
+    resetCardState();
+    return matched;
   }
   return false;
 }
@@ -538,7 +599,7 @@ void setup() {
   lox.begin();
   servoX.attach(PIN_SERVO_X);
   servoY.attach(PIN_SERVO_Y);
-  servoX.writeMicroseconds(1500);
+  servoX.write(90);
   servoY.writeMicroseconds(1500);
 
   setupPWM10bit();
@@ -579,7 +640,7 @@ void loop() {
         cntF++;
       }
       if (nowMillis - stateStartTime >= 4000) {
-        zeroFreq = sumF / cntF;
+        zeroFreq = (cntF > 0) ? sumF / cntF : MODEL_C;
         zeroOffset = zeroFreq - MODEL_C;
         sumF = 0;
         cntF = 0;
@@ -599,18 +660,18 @@ void loop() {
     case STATE_WAIT_CARD: {
       if (readCard()) {
         setLEDsForCard(cardType);
-        Serial.print("CARD=");
-        Serial.println(cardType);
-        state = STATE_REF_DIST_1;
+        state = STATE_REF_DIST;
         stateStartTime = nowMillis;
         showText(CLK1, DIO1, TEXT_SCAN);
       }
       break;
     }
 
-    case STATE_REF_DIST_1: {
+    case STATE_REF_DIST: {
+      servoX.write(90);
+      servoY.writeMicroseconds(1500);
       refDist = getReference();
-      Serial.print("REF1=");
+      Serial.print("REF=");
       Serial.println(refDist);
       state = STATE_WAIT_OBJECT;
       stateStartTime = nowMillis;
@@ -630,36 +691,10 @@ void loop() {
     }
 
     case STATE_SCAN_HEIGHT: {
-      measuredH = scanAxis();
+      measuredH = scanHeight();
       Serial.print("H=");
       Serial.println(measuredH);
       showFloat2d(CLK2, DIO2, measuredH);
-      state = STATE_ROTATE_Y;
-      stateStartTime = nowMillis;
-      break;
-    }
-
-    case STATE_ROTATE_Y: {
-      rotateY_180();
-      state = STATE_REF_DIST_2;
-      stateStartTime = nowMillis;
-      break;
-    }
-
-    case STATE_REF_DIST_2: {
-      refDist = getReference();
-      Serial.print("REF2=");
-      Serial.println(refDist);
-      state = STATE_SCAN_LENGTH;
-      stateStartTime = nowMillis;
-      break;
-    }
-
-    case STATE_SCAN_LENGTH: {
-      measuredL = scanAxis();
-      Serial.print("L=");
-      Serial.println(measuredL);
-      showFloat2d(CLK3, DIO3, measuredL);
       state = STATE_WAIT_WEIGHT;
       stateStartTime = nowMillis;
       weightStableStart = 0;
@@ -743,7 +778,7 @@ void loop() {
 
     case STATE_CONVEYOR: {
       showText(CLK1, DIO1, TEXT_RUN);
-      runConveyor(5000, 120);
+      runConveyor();
       state = STATE_DONE;
       stateStartTime = nowMillis;
       break;
@@ -752,12 +787,12 @@ void loop() {
     case STATE_DONE: {
       Serial.print("FINAL H=");
       Serial.print(measuredH);
-      Serial.print(" L=");
-      Serial.print(measuredL);
       Serial.print(" W=");
       Serial.print(measuredWeight);
       Serial.print(" CARD=");
-      Serial.println(cardType);
+      Serial.print(cardType);
+      Serial.print(" COLOR=");
+      Serial.println(cardColorStr);
 
       showText(CLK1, DIO1, TEXT_DONE);
       showText(CLK2, DIO2, TEXT_DONE);
@@ -768,8 +803,8 @@ void loop() {
       digitalWrite(PIN_LED2, LOW);
       digitalWrite(PIN_LED3, LOW);
       cardType = 0;
+      cardColorStr = "";
       measuredH = 0;
-      measuredL = 0;
       measuredWeight = 0;
       indexCounter = 0;
       cardInserted = false;

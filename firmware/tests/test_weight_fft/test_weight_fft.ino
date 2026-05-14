@@ -2,7 +2,7 @@
 #include "arduinoFFT.h"
 
 const int PIN_INPUT = A0;
-const uint16_t SAMPLES = 128;
+const uint16_t SAMPLES = 512;
 double vReal[SAMPLES];
 double vImag[SAMPLES];
 
@@ -11,7 +11,7 @@ float filteredFreq = 0;
 bool first = true;
 
 // Moving average
-const int AVG_SIZE = 10;
+const int AVG_SIZE = 1;
 float avgBuf[AVG_SIZE];
 int avgIdx = 0;
 bool avgFull = false;

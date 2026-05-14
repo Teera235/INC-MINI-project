@@ -28,7 +28,7 @@ The system runs as a single deterministic state machine on an Arduino Mega 2560.
 ```mermaid
 %%{init: {'theme':'base','themeVariables':{'primaryColor':'#ffffff','primaryBorderColor':'#000000','primaryTextColor':'#000000','lineColor':'#000000','secondaryColor':'#f5f5f5','tertiaryColor':'#ffffff','background':'#ffffff','clusterBkg':'#fafafa','clusterBorder':'#000000'}}}%%
 flowchart LR
-    A[Card Reader] --> B[Distance Scan H, L]
+    A[Card Reader] --> B[Distance Scan H]
     B --> C[Weight Measurement]
     C --> D[Heater + Fan PID]
     D --> E[Conveyor Dispatch]
@@ -39,11 +39,11 @@ flowchart LR
 
 | Stage | Purpose | Primary Sensors / Actuators |
 |---|---|---|
-| Card | Authenticate card type A, B, or C | LDR clock and data, indicator LED |
-| Scan | Measure height H and length L | VL53L0X, two servos |
+| Card | Authenticate card type A, B, or C and identify color | LDR clock, data, color, indicator LED |
+| Scan | Measure object height H | VL53L0X, X-axis servo |
 | Weight | Estimate part weight from oscillator frequency | LC tank into A0, FFT |
 | Thermal | Drive temperature to target with active cooling | DS18B20, relay heater, PWM fan with PID |
-| Dispatch | Move finished part out of the cell | DC motor with H-bridge |
+| Dispatch | Step-pattern conveyor to deliver finished part | DC motor with H-bridge |
 
 ---
 
@@ -72,7 +72,7 @@ flowchart LR
     subgraph MCU[Arduino Mega 2560]
       M1[A0 FFT ADC]
       M2[A2 Fan Tacho]
-      M3[A4..A6 LDR Card]
+      M3[A8..A10 LDR Card]
       M4[D11 PWM Fan]
       M5[D10 DS18B20]
       M6[D12 Relay]
@@ -81,7 +81,7 @@ flowchart LR
       M9[D5..D3 Motor]
       M10[D44..D45 Servos]
       M11[D22..D32 TM1637]
-      M12[D13 Card LED]
+      M12[A3 Card LED]
     end
 
     classDef mcu fill:#ffffff,stroke:#000000,stroke-width:1.2px,color:#000000;
@@ -92,9 +92,10 @@ flowchart LR
 |---|---|---|
 | LC oscillator ADC | A0 | analog input for FFT |
 | Fan tachometer | A2 | analog input, pulse counted with hysteresis |
-| Card LDR clock | A4 | hole pattern timing |
-| Card LDR data | A5 | hole pattern bits |
-| Card LDR color | A6 | reserved for color sensing |
+| Card LDR clock | A8 | hole pattern timing |
+| Card LDR data | A9 | hole pattern bits |
+| Card LDR color | A10 | color identification and removal detection |
+| Card indicator LED | A3 | active during read |
 | PWM fan | D11 | Timer1 OC1A, 10-bit fast PWM |
 | DS18B20 | D10 | OneWire bus |
 | Relay heater | D12 | active LOW |
@@ -106,8 +107,7 @@ flowchart LR
 | Motor IN1 | D4 | direction |
 | Motor IN2 | D3 | direction |
 | Servo X | D44 | scan axis |
-| Servo Y | D45 | rotation axis |
-| Card indicator LED | D13 | active during read |
+| Servo Y | D45 | rotation axis (reserved) |
 | Display 1 CLK / DIO | D22 / D24 | TM1637 |
 | Display 2 CLK / DIO | D26 / D28 | TM1637 |
 | Display 3 CLK / DIO | D30 / D32 | TM1637 |
@@ -130,11 +130,10 @@ sequenceDiagram
     participant CV as Conveyor
 
     U->>CR: Swipe card
-    CR-->>U: Card type A or B or C
+    CR-->>U: Card type A or B or C with color
     CR->>DS: Trigger scan
     DS->>DS: Measure reference, detect object
-    DS->>DS: Scan height H
-    DS->>DS: Rotate Y, scan length L
+    DS->>DS: Sweep X servo, record max height
     DS->>WS: Hand off to weight stage
     WS->>WS: Wait for stable frequency
     WS->>TC: Provide weight, derive target temperature
@@ -155,13 +154,10 @@ stateDiagram-v2
     [*] --> FAN_CALIB
     FAN_CALIB --> WEIGHT_ZERO_CALIB: tachometer baseline ready
     WEIGHT_ZERO_CALIB --> WAIT_CARD: zero offset stored
-    WAIT_CARD --> REF_DIST_1: card pattern matched
-    REF_DIST_1 --> WAIT_OBJECT: reference distance captured
+    WAIT_CARD --> REF_DIST: card pattern matched
+    REF_DIST --> WAIT_OBJECT: reference distance captured
     WAIT_OBJECT --> SCAN_HEIGHT: object confirmed
-    SCAN_HEIGHT --> ROTATE_Y
-    ROTATE_Y --> REF_DIST_2
-    REF_DIST_2 --> SCAN_LENGTH
-    SCAN_LENGTH --> WAIT_WEIGHT
+    SCAN_HEIGHT --> WAIT_WEIGHT
     WAIT_WEIGHT --> HEATING: weight stable for 3 s
     HEATING --> CONVEYOR: temperature reached
     CONVEYOR --> DONE
@@ -172,9 +168,8 @@ The full enumeration lives in `firmware/main/main.ino`:
 
 ```
 STATE_INIT, STATE_FAN_CALIB, STATE_WEIGHT_ZERO_CALIB,
-STATE_WAIT_CARD, STATE_REF_DIST_1, STATE_WAIT_OBJECT,
-STATE_SCAN_HEIGHT, STATE_ROTATE_Y, STATE_REF_DIST_2,
-STATE_SCAN_LENGTH, STATE_WAIT_WEIGHT, STATE_HEATING,
+STATE_WAIT_CARD, STATE_REF_DIST, STATE_WAIT_OBJECT,
+STATE_SCAN_HEIGHT, STATE_WAIT_WEIGHT, STATE_HEATING,
 STATE_CONVEYOR, STATE_DONE
 ```
 
@@ -219,15 +214,15 @@ The buzzer pulses at 300 ms while heating and emits a 3-second tone when the tar
 
 ### Distance and Geometry
 
-The VL53L0X provides millimeter-resolution distance. A reference background distance is averaged over ten stable reads. An object is confirmed when three consecutive deltas exceed 5 mm. The scan axis sweeps the X servo across an 80-step arc, capturing the maximum vertical or longitudinal extent relative to the reference plane.
+The VL53L0X provides millimeter-resolution distance. A reference background distance is averaged over ten stable reads. An object is confirmed when a single delta exceeds 1 cm. The X servo sweeps from 60 to 120 degrees and back, capturing the maximum vertical extent relative to the reference plane. The Y servo is parked at 1500 microseconds and reserved for future rotation features.
 
 ### Card Reader
 
-Two LDRs read a clock pattern and a data pattern punched into a swipe card. The clock channel uses a 30 ms debounce and edge detection. Ten data bits are sampled on each clock rising edge and compared against three reference patterns A, B, and C. A successful match latches the corresponding indicator LED.
+Two LDRs read clock and data tracks punched into a swipe card, while a third LDR senses background color and detects card removal. The clock channel triggers on a falling edge below 500 ADC counts. Ten data bits are sampled on each clock rising edge and compared against three reference patterns A, B, and C. A successful match latches the corresponding indicator LED. If the color channel rises during a read, a 500 ms timer triggers a removal protection reset.
 
 ### Conveyor
 
-A DC motor on an H-bridge runs forward at a fixed PWM for five seconds to deliver the finished part. The fan PID and tachometer keep running during dispatch.
+The conveyor runs a step-pattern of 15 cycles. Each cycle drives the DC motor backward then forward at PWM 100 for 250 ms with 300 ms rest in between. After the cycles complete, a final slow backward run at PWM 70 for 2 seconds delivers the finished part. The fan PID and tachometer keep running during dispatch.
 
 ---
 
