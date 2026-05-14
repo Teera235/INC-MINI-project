@@ -46,6 +46,12 @@ float filteredFreq = 0;
 bool firstFreq = true;
 const unsigned long SAMPLING_INTERVAL_US = 500;
 
+#define MEDIAN_N 5
+float medianBuf[MEDIAN_N];
+int medianIdx = 0;
+bool medianFilled = false;
+const float OUTLIER_THRESHOLD = 5.0;
+
 const float MODEL_A = 0.0003768;
 const float MODEL_B = -0.002523;
 const float MODEL_C = 451.32;
@@ -53,6 +59,11 @@ const float MODEL_C = 451.32;
 float zeroFreq = 0;
 float zeroOffset = 0;
 const float SCALE_PRESENCE_DELTA = 2.0;
+
+float baselineFreq = 0;
+bool baselineInit = false;
+const float BASELINE_ALPHA = 0.002;
+const float BASELINE_LOCK_DELTA = 0.5;
 
 const int POLES = 2;
 float targetRPS = 1.0;
@@ -65,6 +76,9 @@ unsigned long lastPulseTime = 0;
 unsigned long lastPulseReceived = 0;
 bool aboveThreshold = false;
 float rps = 0;
+float rpsRaw = 0;
+float rpsBuf[5] = { 0, 0, 0, 0, 0 };
+int rpsBufIdx = 0;
 float kP = 0.5;
 float kI = 1.0;
 float kD = 0.05;
@@ -324,6 +338,18 @@ void buzzerOff() {
   buzzerState = false;
 }
 
+float medianOf5(float a, float b, float c, float d, float e) {
+  float arr[5] = { a, b, c, d, e };
+  for (int i = 0; i < 4; i++) {
+    for (int j = i + 1; j < 5; j++) {
+      if (arr[j] < arr[i]) {
+        float t = arr[i]; arr[i] = arr[j]; arr[j] = t;
+      }
+    }
+  }
+  return arr[2];
+}
+
 float measureFreq() {
   for (uint16_t i = 0; i < SAMPLES; i++) {
     unsigned long t = micros();
@@ -353,13 +379,40 @@ float measureFreq() {
     double d = y0 - 2.0 * y1 + y2;
     if (d != 0) freq = ((float)pb + 0.5 * (y0 - y2) / d) * sf / (float)SAMPLES;
   }
-  if (firstFreq) { filteredFreq = freq; firstFreq = false; }
-  else { filteredFreq = ALPHA * freq + (1.0 - ALPHA) * filteredFreq; }
+
+  if (firstFreq) {
+    for (int i = 0; i < MEDIAN_N; i++) medianBuf[i] = freq;
+    medianFilled = true;
+    filteredFreq = freq;
+    firstFreq = false;
+    return filteredFreq;
+  }
+
+  if (fabs(freq - filteredFreq) > OUTLIER_THRESHOLD) {
+    return filteredFreq;
+  }
+
+  medianBuf[medianIdx] = freq;
+  medianIdx = (medianIdx + 1) % MEDIAN_N;
+  float med = medianOf5(medianBuf[0], medianBuf[1], medianBuf[2], medianBuf[3], medianBuf[4]);
+
+  filteredFreq = ALPHA * med + (1.0 - ALPHA) * filteredFreq;
+
+  if (!baselineInit) {
+    baselineFreq = filteredFreq;
+    baselineInit = true;
+  } else {
+    if (fabs(filteredFreq - baselineFreq) < BASELINE_LOCK_DELTA) {
+      baselineFreq = BASELINE_ALPHA * filteredFreq + (1.0 - BASELINE_ALPHA) * baselineFreq;
+    }
+  }
+
   return filteredFreq;
 }
 
 float freqToWeight(float freq) {
-  float corrected = freq - zeroOffset;
+  float reference = baselineInit ? baselineFreq : zeroFreq;
+  float corrected = freq + (MODEL_C - reference);
   float discriminant = MODEL_B * MODEL_B - 4.0 * MODEL_A * (MODEL_C - corrected);
   if (discriminant < 0) return 0;
   float w = (-MODEL_B + sqrt(discriminant)) / (2.0 * MODEL_A);
@@ -368,7 +421,8 @@ float freqToWeight(float freq) {
 }
 
 bool isObjectOnScale(float freq) {
-  return fabs(freq - zeroFreq) > SCALE_PRESENCE_DELTA;
+  float ref = baselineInit ? baselineFreq : zeroFreq;
+  return fabs(freq - ref) > SCALE_PRESENCE_DELTA;
 }
 
 float readTemp() {
@@ -412,6 +466,12 @@ void updateFanPID(unsigned long nowMillis) {
   }
 }
 
+int feedForwardPWM(float tgtRPS) {
+  if (tgtRPS <= 1.0) return 150;
+  if (tgtRPS >= 20.0) return 900;
+  return (int)(150.0 + (tgtRPS - 1.0) * (750.0 / 19.0));
+}
+
 void updateFanSensor() {
   int val = analogRead(PIN_FAN_SENSOR);
   unsigned long nowMicros = micros();
@@ -432,7 +492,10 @@ void updateFanSensor() {
     aboveThreshold = true;
     if (lastPulseTime > 0) {
       unsigned long interval = nowMicros - lastPulseTime;
-      rps = 1000000.0 / (interval * POLES);
+      rpsRaw = 1000000.0 / (interval * POLES);
+      rpsBuf[rpsBufIdx] = rpsRaw;
+      rpsBufIdx = (rpsBufIdx + 1) % 5;
+      rps = medianOf5(rpsBuf[0], rpsBuf[1], rpsBuf[2], rpsBuf[3], rpsBuf[4]);
     }
     lastPulseTime = nowMicros;
     lastPulseReceived = nowMicros;
@@ -881,12 +944,20 @@ void loop() {
       measuredWeight = weightFromCard(programNum);
       targetTemp     = weightToTargetTemp(measuredWeight);
       targetRPS      = weightToTargetRPS(measuredWeight);
+
+      pwmValue = (float)feedForwardPWM(targetRPS);
+      writePWM10bit((int)pwmValue);
+      integral = 0;
+      errorPrev = 0;
+
       Serial.print("W_FROM_CARD=");
       Serial.print(measuredWeight);
       Serial.print(" TGT_TEMP=");
       Serial.print(targetTemp);
       Serial.print(" TGT_RPS=");
-      Serial.println(targetRPS);
+      Serial.print(targetRPS);
+      Serial.print(" FF_PWM=");
+      Serial.println((int)pwmValue);
 
       state = STATE_WEIGH_DONE;
       stateStartTime = now;
