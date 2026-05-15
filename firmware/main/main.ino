@@ -553,17 +553,14 @@ float getReference() {
   for (int i = 0; i < 10; i++) {
     float d = readStable();
     if (d > 0) { sum += d; count++; }
-    delay(100);
+    delay(50);
   }
   return (count > 0) ? sum / count : -1;
 }
 
 bool objectAtScanner() {
-  static int hit = 0;
   float d = readStable();
-  if (d > 0 && fabs(d - refDist) > 1.0) hit++;
-  else hit = 0;
-  return (hit >= 2);
+  return (d > 0 && fabs(d - refDist) > 2.0);
 }
 
 float scanDimension() {
