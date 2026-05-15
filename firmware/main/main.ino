@@ -39,7 +39,7 @@
 #define RELAY_OFF HIGH
 
 const int THRESHOLD_HOLE = 500;
-const int THRESHOLD_DATA = 200;
+const int THRESHOLD_DATA = 500;
 const int THRESHOLD_REMOVE_COLOR = 55;
 const int THRESHOLD_CARD_OUT = 900;
 const int PATTERN_SIZE = 10;
@@ -592,9 +592,18 @@ int readCardOnce() {
         Serial.print("REMOVED_EARLY bits=");
         Serial.println(indexCounter);
         bool partial = (indexCounter > 0);
+        int avgColor = (colorCount > 0) ? (int)(colorSum / colorCount) : 0;
         resetCardState();
         lastClockState = currentClock;
-        if (partial) { programNum = 'E'; return 2; }
+        if (partial) {
+          if      (avgColor >= 500 && avgColor < 600) programNum = '2';
+          else if (avgColor >= 600)                   programNum = '3';
+          else if (avgColor < 200)                    programNum = '3';
+          else                                        programNum = '1';
+          Serial.print("Partial -> ");
+          Serial.println(programNum);
+          return 1;
+        }
         return 0;
       }
     } else {
@@ -623,14 +632,23 @@ int readCardOnce() {
   lastClockState = currentClock;
 
   if (indexCounter >= PATTERN_SIZE) {
-    int result = 0;
-    if      (comparePattern(pattern, CardA)) { programNum = '1'; result = 1; }
-    else if (comparePattern(pattern, CardB)) { programNum = '2'; result = 1; }
-    else if (comparePattern(pattern, CardC)) { programNum = '3'; result = 1; }
-    else                                     { programNum = 'E'; result = 2; }
+    int result = 1;
+    int avgColor = (colorCount > 0) ? (int)(colorSum / colorCount) : 0;
+
+    if      (comparePattern(pattern, CardA)) { programNum = '1'; }
+    else if (comparePattern(pattern, CardB)) { programNum = '2'; }
+    else if (comparePattern(pattern, CardC)) { programNum = '3'; }
+    else {
+      if      (avgColor >= 500 && avgColor < 600) programNum = '2';
+      else if (avgColor >= 600)                   programNum = '3';
+      else if (avgColor < 200)                    programNum = '3';
+      else                                        programNum = '1';
+    }
 
     Serial.print("PATTERN=");
     for (int i = 0; i < PATTERN_SIZE; i++) Serial.print(pattern[i]);
+    Serial.print(" AvgColor=");
+    Serial.print(avgColor);
     Serial.print(" RESULT=");
     Serial.println(programNum);
 
