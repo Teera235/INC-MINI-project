@@ -260,6 +260,17 @@ void showCM(int clk, int dio, float cm) {
   writeRaw(clk, dio, b1, b2, b3, b4);
 }
 
+void showDist(int clk, int dio, float cm) {
+  int v = (int)(cm * 10 + 0.5);
+  if (v > 9999) v = 9999;
+  if (v < 0) v = 0;
+  uint8_t b1 = (v / 1000) % 10 > 0 ? seg[(v / 1000) % 10] : SEG_BLANK;
+  uint8_t b2 = (v / 100) % 10 > 0 || (v / 1000) % 10 > 0 ? seg[(v / 100) % 10] : SEG_BLANK;
+  uint8_t b3 = seg[(v / 10) % 10] | 0x80;
+  uint8_t b4 = seg[v % 10];
+  writeRaw(clk, dio, b1, b2, b3, b4);
+}
+
 void showTemp(int clk, int dio, float t) {
   int v = (int)(t + 0.5);
   if (v > 999) v = 999;
@@ -851,7 +862,10 @@ void loop() {
           refDist = getReference();
           Serial.print("REF=");
           Serial.println(refDist);
+          showDist(CLK2, DIO2, refDist);
         }
+        float liveD = readStable();
+        if (liveD > 0) showDist(CLK2, DIO2, liveD);
         if (objectAtScanner()) {
           Serial.println("OBJECT_DETECTED");
           ledBlink(IDX_SCAN, 0.5);
@@ -866,6 +880,7 @@ void loop() {
       refDist = getReference();
       Serial.print("REF=");
       Serial.println(refDist);
+      showDist(CLK2, DIO2, refDist);
       state = STATE_SCAN_DIM1;
       stateStartTime = now;
       break;
