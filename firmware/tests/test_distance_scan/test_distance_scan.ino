@@ -210,14 +210,14 @@ void loop() {
     refDist = getReference();
     Serial.print("REF DIST = ");
     Serial.println(refDist, 2);
-    showDist(CLK1, DIO1, refDist);
-    clearDisplay(CLK2, DIO2);
+    clearDisplay(CLK1, DIO1);
+    showDist(CLK2, DIO2, refDist);
     clearDisplay(CLK3, DIO3);
     state = 1;
   }
   else if (state == 1) {
     float d = readStable();
-    showDist(CLK1, DIO1, d > 0 ? d : 0);
+    showDist(CLK2, DIO2, d > 0 ? d : 0);
     Serial.print("dist=");
     Serial.print(d, 2);
     Serial.print(" delta=");
