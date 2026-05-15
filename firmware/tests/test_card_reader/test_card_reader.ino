@@ -101,9 +101,10 @@ void loop() {
     Serial.print("Avg color: ");
     Serial.print(avg);
     Serial.print(" -> ");
-    if (avg > 40)      Serial.println("White");
-    else if (avg < 30) Serial.println("Black");
-    else               Serial.println("Yellow");
+    if (avg >= 500 && avg < 600)      Serial.println("Yellow");
+    else if (avg >= 400)              Serial.println("White");
+    else if (avg < 200)               Serial.println("Black");
+    else                              Serial.println("Unknown");
 
     Serial.println("Remove card to continue...");
     while (analogRead(PIN_LDR_CLOCK) < 900) delay(10);

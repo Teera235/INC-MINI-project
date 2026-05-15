@@ -711,9 +711,10 @@ int readCardOnce() {
     Serial.print("AvgColor=");
     Serial.print(avgColor);
     Serial.print(" -> ");
-    if (avgColor > 40)      Serial.println("White");
-    else if (avgColor < 30) Serial.println("Black");
-    else                    Serial.println("Yellow");
+    if (avgColor >= 500 && avgColor < 600) Serial.println("Yellow");
+    else if (avgColor >= 400)              Serial.println("White");
+    else if (avgColor < 200)               Serial.println("Black");
+    else                                   Serial.println("Unknown");
 
     Serial.println("Please remove card...");
     while (analogRead(PIN_LDR_CLOCK) < 900) {
