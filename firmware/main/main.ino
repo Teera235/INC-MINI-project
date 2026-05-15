@@ -501,9 +501,17 @@ bool objectAtScanner() {
 
 float scanDimension() {
   float maxDim = 0;
+  unsigned long lastBlink = millis();
+  bool blinkState = false;
   for (int angle = 60; angle <= 120; angle++) {
     servoX.write(angle);
     delay(40);
+    unsigned long n = millis();
+    if (n - lastBlink >= 500) {
+      lastBlink = n;
+      blinkState = !blinkState;
+      digitalWrite(PIN_LED_SCAN, blinkState ? HIGH : LOW);
+    }
     float d = readStable();
     if (d > 0) {
       float h = refDist - d;
@@ -513,6 +521,12 @@ float scanDimension() {
   for (int angle = 120; angle >= 60; angle--) {
     servoX.write(angle);
     delay(40);
+    unsigned long n = millis();
+    if (n - lastBlink >= 500) {
+      lastBlink = n;
+      blinkState = !blinkState;
+      digitalWrite(PIN_LED_SCAN, blinkState ? HIGH : LOW);
+    }
     float d = readStable();
     if (d > 0) {
       float h = refDist - d;
@@ -855,54 +869,39 @@ void loop() {
     }
 
     case STATE_SCAN_DIM1: {
+      ledBlink(IDX_SCAN, 0.5);
       digitalWrite(PIN_BUZZER, HIGH);
-      dimW = scanDimension();
+      dimH = scanDimension();
       digitalWrite(PIN_BUZZER, LOW);
-      Serial.print("DIM1=");
-      Serial.println(dimW);
-      showCM(CLK1, DIO1, dimW);
-      state = STATE_ROTATE_TO_DIM2;
+      dimW = dimH;
+      dimL = dimH;
+      Serial.print("DIM=");
+      Serial.println(dimH);
+      showCM(CLK1, DIO1, dimH);
+      showCM(CLK2, DIO2, dimH);
+      showCM(CLK3, DIO3, dimH);
+      state = STATE_SCAN_DONE;
       stateStartTime = now;
       break;
     }
 
     case STATE_ROTATE_TO_DIM2: {
-      rotateServoY(90);
-      refDist = getReference();
-      state = STATE_SCAN_DIM2;
-      stateStartTime = now;
+      state = STATE_SCAN_DONE;
       break;
     }
 
     case STATE_SCAN_DIM2: {
-      digitalWrite(PIN_BUZZER, HIGH);
-      dimL = scanDimension();
-      digitalWrite(PIN_BUZZER, LOW);
-      Serial.print("DIM2=");
-      Serial.println(dimL);
-      showCM(CLK2, DIO2, dimL);
-      state = STATE_ROTATE_TO_DIM3;
-      stateStartTime = now;
+      state = STATE_SCAN_DONE;
       break;
     }
 
     case STATE_ROTATE_TO_DIM3: {
-      rotateServoY(180);
-      refDist = getReference();
-      state = STATE_SCAN_DIM3;
-      stateStartTime = now;
+      state = STATE_SCAN_DONE;
       break;
     }
 
     case STATE_SCAN_DIM3: {
-      digitalWrite(PIN_BUZZER, HIGH);
-      dimH = scanDimension();
-      digitalWrite(PIN_BUZZER, LOW);
-      Serial.print("DIM3=");
-      Serial.println(dimH);
-      showCM(CLK3, DIO3, dimH);
       state = STATE_SCAN_DONE;
-      stateStartTime = now;
       break;
     }
 
@@ -911,11 +910,7 @@ void loop() {
       shortBeep(150);
       delay(100);
       shortBeep(150);
-      Serial.print("FINAL DIMS W=");
-      Serial.print(dimW);
-      Serial.print(" L=");
-      Serial.print(dimL);
-      Serial.print(" H=");
+      Serial.print("FINAL DIM H=");
       Serial.println(dimH);
       delay(2000);
       state = STATE_TRANSFER;
