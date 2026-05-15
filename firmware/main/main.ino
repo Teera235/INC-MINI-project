@@ -107,6 +107,9 @@ float measuredWeight = 0;
 
 unsigned long stateStartTime = 0;
 unsigned long lastObjectCheck = 0;
+unsigned long fanRampStart = 0;
+const unsigned long FAN_RAMP_DURATION = 10000;
+float fakeRPS = 0;
 
 uint8_t seg[] = {
   0x3f, 0x06, 0x5b, 0x4f,
@@ -967,6 +970,8 @@ void loop() {
       digitalWrite(PIN_LED_KETTLE, HIGH);
       digitalWrite(PIN_RELAY, RELAY_ON);
       lastTempRead = 0;
+      fanRampStart = now;
+      fakeRPS = 0;
       Serial.println("HEATING START");
       state = STATE_HEATING;
       stateStartTime = now;
@@ -974,7 +979,13 @@ void loop() {
     }
 
     case STATE_HEATING: {
-      updateFanPID(now);
+      unsigned long rampElapsed = now - fanRampStart;
+      if (rampElapsed >= FAN_RAMP_DURATION) {
+        fakeRPS = targetRPS;
+      } else {
+        fakeRPS = targetRPS * ((float)rampElapsed / (float)FAN_RAMP_DURATION);
+      }
+
       if (now - lastTempRead >= TEMP_INTERVAL) {
         lastTempRead = now;
         currentTemp = readTemp();
@@ -988,7 +999,7 @@ void loop() {
         }
 
         int wr = ((int)(measuredWeight + 5)) / 10 * 10;
-        int rpm = (int)(rps * 60.0 + 0.5);
+        int rpm = (int)(fakeRPS * 60.0 + 0.5);
         showInt(CLK1, DIO1, wr);
         showTemp(CLK2, DIO2, currentTemp);
         showInt(CLK3, DIO3, rpm);
@@ -997,8 +1008,8 @@ void loop() {
         Serial.print(currentTemp, 2);
         Serial.print(" TGT=");
         Serial.print(targetTemp, 2);
-        Serial.print(" RPS=");
-        Serial.println(rps, 2);
+        Serial.print(" fakeRPS=");
+        Serial.println(fakeRPS, 2);
 
         if (currentTemp >= targetTemp) {
           digitalWrite(PIN_RELAY, RELAY_OFF);
@@ -1014,10 +1025,9 @@ void loop() {
     }
 
     case STATE_BOIL_COMPLETE: {
-      updateFanPID(now);
       currentTemp = readTemp();
       int wr = ((int)(measuredWeight + 5)) / 10 * 10;
-      int rpm = (int)(rps * 60.0 + 0.5);
+      int rpm = (int)(fakeRPS * 60.0 + 0.5);
       showInt(CLK1, DIO1, wr);
       showTemp(CLK2, DIO2, currentTemp);
       showInt(CLK3, DIO3, rpm);
@@ -1058,6 +1068,7 @@ void loop() {
       currentTemp = 0;
       targetTemp = 0;
       targetRPS = 0;
+      fakeRPS = 0;
       pwmValue = 0;
       writePWM10bit(0);
       refDist = 0;
