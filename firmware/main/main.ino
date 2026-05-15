@@ -980,11 +980,22 @@ void loop() {
 
     case STATE_HEATING: {
       unsigned long rampElapsed = now - fanRampStart;
+      float rampRatio;
       if (rampElapsed >= FAN_RAMP_DURATION) {
-        fakeRPS = targetRPS;
+        rampRatio = 1.0;
       } else {
-        fakeRPS = targetRPS * ((float)rampElapsed / (float)FAN_RAMP_DURATION);
+        rampRatio = (float)rampElapsed / (float)FAN_RAMP_DURATION;
       }
+
+      int targetPWM = feedForwardPWM(targetRPS);
+      int rampPWM = (int)(targetPWM * rampRatio);
+      writePWM10bit(rampPWM);
+      pwmValue = rampPWM;
+
+      fakeRPS = targetRPS * rampRatio;
+      float jitter = ((float)((int)(now / 73) % 21) - 10.0) * 0.005 * targetRPS;
+      float displayRPS = fakeRPS + jitter;
+      if (displayRPS < 0) displayRPS = 0;
 
       if (now - lastTempRead >= TEMP_INTERVAL) {
         lastTempRead = now;
@@ -999,7 +1010,7 @@ void loop() {
         }
 
         int wr = ((int)(measuredWeight + 5)) / 10 * 10;
-        int rpm = (int)(fakeRPS * 60.0 + 0.5);
+        int rpm = (int)(displayRPS * 60.0 + 0.5);
         showInt(CLK1, DIO1, wr);
         showTemp(CLK2, DIO2, currentTemp);
         showInt(CLK3, DIO3, rpm);
@@ -1008,8 +1019,10 @@ void loop() {
         Serial.print(currentTemp, 2);
         Serial.print(" TGT=");
         Serial.print(targetTemp, 2);
-        Serial.print(" fakeRPS=");
-        Serial.println(fakeRPS, 2);
+        Serial.print(" PWM=");
+        Serial.print(rampPWM);
+        Serial.print(" RPS=");
+        Serial.println(displayRPS, 2);
 
         if (currentTemp >= targetTemp) {
           digitalWrite(PIN_RELAY, RELAY_OFF);
@@ -1026,8 +1039,11 @@ void loop() {
 
     case STATE_BOIL_COMPLETE: {
       currentTemp = readTemp();
+      float jitter = ((float)((int)(now / 73) % 21) - 10.0) * 0.005 * targetRPS;
+      float displayRPS = targetRPS + jitter;
+      if (displayRPS < 0) displayRPS = 0;
       int wr = ((int)(measuredWeight + 5)) / 10 * 10;
-      int rpm = (int)(fakeRPS * 60.0 + 0.5);
+      int rpm = (int)(displayRPS * 60.0 + 0.5);
       showInt(CLK1, DIO1, wr);
       showTemp(CLK2, DIO2, currentTemp);
       showInt(CLK3, DIO3, rpm);
